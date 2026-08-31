@@ -31,7 +31,7 @@ jobs:
           uv run ruff format --check apps packages tests examples
           uv run mypy
           uv run pytest tests/unit tests/security/test_deployment_static.py -q
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.18.0"
           cache: npm
