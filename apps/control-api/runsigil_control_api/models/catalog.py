@@ -102,3 +102,22 @@ class Tool(Base, IdMixin, TenantMixin, TimestampMixin):
     risk: Mapped[str] = mapped_column(String(30))
     connector: Mapped[str] = mapped_column(String(200))
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class ModelRoute(Base, IdMixin, TenantMixin, TimestampMixin):
+    __tablename__ = "model_routes"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "project_id", "name"),
+        ForeignKeyConstraint(
+            ["organization_id", "project_id"],
+            ["projects.organization_id", "projects.id"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    project_id: Mapped[UUID] = mapped_column()
+    name: Mapped[str] = mapped_column(String(200))
+    provider: Mapped[str] = mapped_column(String(100))
+    model: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30))

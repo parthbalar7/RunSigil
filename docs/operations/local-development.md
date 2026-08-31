@@ -13,6 +13,11 @@ does not discover or operate any other cluster or Compose project.
    `examples/governed-action/run-live.ps1` for the REST/CLI flow, or run
    `examples/protocol-gateway/run-live.ps1` for MCP and A2A.
 
+OpenTelemetry traces and metrics are sent to the isolated collector when
+`RUNSIGIL_OTEL_ENABLED=true`. Its debug exporter is development-only. Use
+`runsigil dlq list --json` to inspect unresolved actions; `runsigil dlq redrive`
+requires the current row version and always schedules reconciliation, not execution.
+
 The development endpoints are the control API at `http://localhost:8000`, protocol
 and egress gateway at `http://localhost:8080`, public A2A Agent Card at
 `http://localhost:8080/.well-known/agent-card.json`, MCP at

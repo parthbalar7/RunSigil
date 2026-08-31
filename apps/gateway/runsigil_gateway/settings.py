@@ -24,6 +24,8 @@ class GatewaySettings(BaseSettings):
     protocol_allowed_origins: str = "http://localhost:8080,http://127.0.0.1:8080"
     protocol_control_response_max_bytes: int = Field(default=1_048_576, ge=65_536, le=8_388_608)
     a2a_blocking_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
 
     @property
     def allowed_protocol_origins(self) -> frozenset[str]:

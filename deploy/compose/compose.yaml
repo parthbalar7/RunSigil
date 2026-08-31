@@ -87,7 +87,7 @@ services:
 
   control-api:
     <<: *python-service
-    image: ghcr.io/runsigil/control-api:0.1.0-local
+    image: ghcr.io/runsigil/control-api:0.2.0-local
     command: ["runsigil-api"]
     environment:
       RUNSIGIL_ENVIRONMENT: ${RUNSIGIL_ENVIRONMENT:-development}
@@ -96,6 +96,8 @@ services:
       RUNSIGIL_GATEWAY_SERVICE_TOKEN: ${RUNSIGIL_GATEWAY_SERVICE_TOKEN:?set the gateway service token}
       RUNSIGIL_ACTION_ENCRYPTION_KEY_B64: ${RUNSIGIL_ACTION_ENCRYPTION_KEY_B64:?set the action encryption key}
       RUNSIGIL_DEMO_PROVIDER_AUDIENCE: ${RUNSIGIL_DEMO_PROVIDER_AUDIENCE:-runsigil-demo-provider}
+      RUNSIGIL_OTEL_ENABLED: "true"
+      RUNSIGIL_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "8000:8000"
     healthcheck:
@@ -123,7 +125,7 @@ services:
 
   gateway:
     <<: *python-service
-    image: ghcr.io/runsigil/gateway:0.1.0-local
+    image: ghcr.io/runsigil/gateway:0.2.0-local
     command: ["runsigil-gateway"]
     environment:
       RUNSIGIL_ENVIRONMENT: ${RUNSIGIL_ENVIRONMENT:-development}
@@ -136,6 +138,8 @@ services:
       RUNSIGIL_ALLOW_PRIVATE_DEMO_PROVIDER: ${RUNSIGIL_ALLOW_PRIVATE_DEMO_PROVIDER:-false}
       RUNSIGIL_PROTOCOL_PUBLIC_BASE_URL: ${RUNSIGIL_PROTOCOL_PUBLIC_BASE_URL:-http://localhost:8080}
       RUNSIGIL_PROTOCOL_ALLOWED_ORIGINS: ${RUNSIGIL_PROTOCOL_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      RUNSIGIL_OTEL_ENABLED: "true"
+      RUNSIGIL_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "8080:8080"
     healthcheck:
@@ -151,7 +155,7 @@ services:
 
   worker:
     <<: *python-service
-    image: ghcr.io/runsigil/worker:0.1.0-local
+    image: ghcr.io/runsigil/worker:0.2.0-local
     command: ["runsigil-worker"]
     environment:
       RUNSIGIL_ENVIRONMENT: ${RUNSIGIL_ENVIRONMENT:-development}
@@ -161,6 +165,10 @@ services:
       RUNSIGIL_ACTION_ENCRYPTION_KEY_B64: ${RUNSIGIL_ACTION_ENCRYPTION_KEY_B64:?set the action encryption key}
       RUNSIGIL_EVIDENCE_ED25519_PRIVATE_KEY_B64: ${RUNSIGIL_EVIDENCE_ED25519_PRIVATE_KEY_B64:?set the evidence signing seed}
       RUNSIGIL_EVIDENCE_SIGNING_KEY_ID: ${RUNSIGIL_EVIDENCE_SIGNING_KEY_ID:-development-2026-01}
+      RUNSIGIL_MAX_RECONCILIATION_ATTEMPTS: ${RUNSIGIL_MAX_RECONCILIATION_ATTEMPTS:-3}
+      RUNSIGIL_MAX_DLQ_REDRIVES: ${RUNSIGIL_MAX_DLQ_REDRIVES:-2}
+      RUNSIGIL_OTEL_ENABLED: "true"
+      RUNSIGIL_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "8010:8010"
     healthcheck:
@@ -173,7 +181,7 @@ services:
         condition: service_healthy
 
   web:
-    image: ghcr.io/runsigil/web:0.1.0-local
+    image: ghcr.io/runsigil/web:0.2.0-local
     build:
       context: ../../apps/web
       dockerfile: Dockerfile

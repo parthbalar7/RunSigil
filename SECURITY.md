@@ -9,7 +9,6 @@ The maintainers aim to acknowledge a report within three business days, provide 
 triage update within seven, and coordinate disclosure after a fix is available.
 
 Only the latest minor release receives security fixes during the pre-1.0 period.
-The current Milestone 1 slice is not a production process executor. Development
+The current Milestone 0-2 reference slice is not a production process executor. Development
 credentials, the demo provider, local HTTP, and Compose are not production security
 boundaries. See the threat model for supported and residual boundaries.
-

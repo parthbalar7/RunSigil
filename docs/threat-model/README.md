@@ -27,8 +27,9 @@
 | Missing governance | Typed fail-closed policy engine | Policy outage test |
 | Changed/replayed approval | Recomputed digest, expiry, atomic one-use transition | Approval security tests |
 | Side effect without durable intent | Transactional intent/action/outbox and pre-I/O claim commit | Worker integration test |
-| Duplicate after ambiguity | Stable key and reconciliation-required state | Crash/ambiguity tests |
-| Budget overrun | Reservation in the creation transaction | Budget-before-provider test |
+| Duplicate after ambiguity | Stable key, reconcile-only recovery, bounded DLQ terminal | Crash/ambiguity and DLQ tests |
+| Budget overrun | Stable-order row locks and all-scope reservations in the creation transaction | Concurrent and multi-scope budget tests |
+| Unsafe operator replay | Version-fenced, audited, bounded redrive enters reconciliation only | DLQ integration test |
 | Caller token forwarded | Gateway-only service auth plus audience-bound provider token | Credential-boundary test |
 | Sensitive content exposure | Default metadata-only traces/evidence and boundary redaction | Content/secret tests |
 | Evidence modification | Domain-separated Ed25519 signature | Tamper test |
@@ -38,6 +39,8 @@
 | Prompt or file ingestion through A2A | Exactly one structured data Part; text/raw/URL rejected | A2A contract test |
 | Cross-tenant task probing | Protocol task IDs resolved through auth-derived RLS context | API and protocol tests |
 | Cancellation racing an external effect | Cancellation only at the locked pre-effect approval boundary | API integration test |
+| Prompt/output leakage through telemetry | Fixed metadata attributes; no raw prompt/output/action arguments | Telemetry unit test |
+| Framework resumes changed content | Digest validation or native exact tool-call approval bridge | Adapter contract tests |
 
 ## Residual risk
 
@@ -47,7 +50,9 @@ The development provider allows explicit private-network access and HTTP; produc
 configuration rejects this. Object Lock, independent timestamping, OIDC federation,
 DPoP/mTLS, Kubernetes enforcement, full ABAC, containment providers, and sensor
 attestation are not implemented in this milestone.
-MCP sessions/streams and A2A streaming/push are not advertised or implemented.
+MCP sessions/streams and A2A streaming/push are not advertised or implemented. The
+OpenTelemetry GenAI semantic conventions used here are still development-stability
+upstream. DLQ redrive is PostgreSQL polling, not a high-volume broker claim.
 
 ## Abuse cases
 
@@ -65,3 +70,7 @@ MCP sessions/streams and A2A streaming/push are not advertised or implemented.
    rejected before creating a Run.
 9. A caller cancels after approval dispatch: the control API rejects the transition
    because external I/O may already have started.
+10. A provider remains unavailable through repeated receipt checks: the worker
+    dead-letters the action while retaining reservations; redrive cannot execute it.
+11. Two callers race the final quota unit: stable-order row locks allow one complete
+    reservation set and reject the other before either provider call.

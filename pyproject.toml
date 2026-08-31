@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "runsigil"
-version = "0.1.0"
+version = "0.2.0"
 description = "Govern every agent run."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,9 +15,12 @@ dependencies = [
   "cryptography==48.0.1",
   "fastapi==0.139.0",
   "httpx==0.28.1",
+  "opentelemetry-api==1.44.0",
+  "opentelemetry-exporter-otlp-proto-http==1.44.0",
+  "opentelemetry-sdk==1.44.0",
   "psycopg[binary]==3.2.3",
-  "pydantic==2.11.7",
-  "pydantic-settings==2.7.1",
+  "pydantic==2.13.5",
+  "pydantic-settings==2.15.0",
   "sqlalchemy==2.0.36",
   "typer==0.26.8",
   "uvicorn[standard]==0.34.0",
@@ -25,12 +28,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "langgraph==1.2.11",
   "mypy==1.14.1",
   "pytest==8.3.4",
   "pytest-cov==6.0.0",
   "pytest-asyncio==0.25.3",
+  "openai-agents==0.22.0",
   "ruff==0.9.2",
 ]
+langgraph-adapter = ["langgraph==1.2.11"]
+openai-agents-adapter = ["openai-agents==0.22.0"]
 
 [project.scripts]
 runsigil = "runsigil_cli.main:app"
@@ -47,6 +54,10 @@ where = [
   "packages/policy",
   "packages/evidence",
   "packages/cli",
+  "packages/sdk-python",
+  "packages/telemetry",
+  "adapters/langgraph",
+  "adapters/openai-agents",
 ]
 include = ["runsigil_*"]
 
@@ -84,6 +95,10 @@ mypy_path = [
   "packages/policy",
   "packages/evidence",
   "packages/cli",
+  "packages/sdk-python",
+  "packages/telemetry",
+  "adapters/langgraph",
+  "adapters/openai-agents",
 ]
 packages = [
   "runsigil_contracts",
@@ -93,5 +108,9 @@ packages = [
   "runsigil_worker",
   "runsigil_gateway",
   "runsigil_cli",
+  "runsigil_sdk",
+  "runsigil_telemetry",
+  "runsigil_langgraph",
+  "runsigil_openai_agents",
 ]
 exclude = ["alembic"]

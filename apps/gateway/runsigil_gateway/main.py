@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from runsigil_contracts import ActionExecutionRequest, ActionExecutionResult, canonical_digest
 from runsigil_contracts.errors import ErrorCode, RunSigilError
+from runsigil_telemetry import Operation, TelemetryConfig, configure_telemetry
 
 from runsigil_gateway.a2a import router as a2a_router
 from runsigil_gateway.egress import validate_fixed_destination
@@ -17,7 +18,16 @@ from runsigil_gateway.mcp import router as mcp_router
 from runsigil_gateway.settings import GatewaySettings, get_gateway_settings
 from runsigil_gateway.tokens import mint_audience_token
 
-app = FastAPI(title="RunSigil Protocol and Egress Gateway", version="0.1.0")
+_settings = get_gateway_settings()
+configure_telemetry(
+    TelemetryConfig(
+        service_name="runsigil-gateway",
+        enabled=_settings.otel_enabled,
+        otlp_http_endpoint=_settings.otel_exporter_otlp_endpoint,
+    )
+)
+
+app = FastAPI(title="RunSigil Protocol and Egress Gateway", version="0.2.0")
 app.include_router(mcp_router)
 app.include_router(a2a_router)
 
@@ -110,16 +120,27 @@ async def execute_action(
     )
     authorization = await _authorize(request, "execute", settings)
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.gateway_request_timeout_seconds,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            response = await client.post(
-                settings.demo_provider_url,
-                headers=_provider_headers(request, authorization, settings),
-                json=request.arguments,
-            )
+        with Operation(
+            "execute_tool demo.invoice.send",
+            metric_name="gen_ai.execute_tool.duration",
+            attributes={
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": "demo.invoice.send",
+                "runsigil.run.id": str(request.run_id),
+                "runsigil.action.id": str(request.action_id),
+                "runsigil.content_captured": False,
+            },
+        ):
+            async with httpx.AsyncClient(
+                timeout=settings.gateway_request_timeout_seconds,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    settings.demo_provider_url,
+                    headers=_provider_headers(request, authorization, settings),
+                    json=request.arguments,
+                )
         if len(response.content) > settings.gateway_response_max_bytes:
             return ActionExecutionResult(
                 outcome="ambiguous", error_code="provider_response_too_large"

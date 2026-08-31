@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import secrets
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID, uuid4
@@ -16,6 +15,7 @@ from runsigil_contracts import (
 from runsigil_contracts.crypto import decode_aes256_key, open_json, seal_json
 from runsigil_contracts.errors import ErrorCode, RunSigilError
 from runsigil_policy import PolicyEvaluationError, evaluate
+from runsigil_telemetry import Operation, current_trace_identifiers
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -25,8 +25,6 @@ from runsigil_control_api.models import (
     AISystem,
     ApprovalRequest,
     AuditEvent,
-    Budget,
-    BudgetReservation,
     Delegation,
     Environment,
     EvidenceBundle,
@@ -44,6 +42,13 @@ from runsigil_control_api.schemas import (
     GovernedActionInput,
     InternalAuthorizationResponse,
 )
+from runsigil_control_api.services.budgets import (
+    BudgetContext,
+    action_reservations,
+    link_action_reservations,
+    release_action_reservations,
+    reserve_budgets,
+)
 from runsigil_control_api.settings import Settings, get_settings
 
 if TYPE_CHECKING:
@@ -52,6 +57,12 @@ if TYPE_CHECKING:
 ACTION_TYPE = "demo.invoice.send"
 TOOL_NAME = "demo.invoice.send"
 ESTIMATED_COST_MINOR = 1
+ACTION_BUDGET_ESTIMATES = {
+    "currency:USD": ESTIMATED_COST_MINOR,
+    "requests": 1,
+    "concurrent_runs": 1,
+    "tool_actions": 1,
+}
 
 
 class ActionEncryptionSettings(Protocol):
@@ -116,13 +127,15 @@ def _trace(
         select(func.coalesce(func.max(TraceEvent.sequence), 0)).where(TraceEvent.run_id == run_id)
     )
     sequence = latest_sequence if latest_sequence is not None else 0
+    trace_id, span_id, parent_span_id = current_trace_identifiers(run_id)
     event = TraceEvent(
         id=uuid4(),
         organization_id=organization_id,
         run_id=run_id,
         node_id=node_id,
-        span_id=secrets.token_hex(8),
-        parent_span_id=None,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
         event_type=event_type,
         status=status,
         sequence=sequence + 1,
@@ -204,42 +217,6 @@ def _require_catalog(
     return project, environment, agent
 
 
-def _reserve_budget(
-    session: Session, *, organization_id: UUID, project_id: UUID, run_id: UUID
-) -> BudgetReservation:
-    budget = session.scalar(
-        select(Budget)
-        .where(Budget.project_id == project_id, Budget.currency == "USD")
-        .with_for_update()
-    )
-    if budget is None:
-        raise RunSigilError(
-            ErrorCode.BUDGET_EXHAUSTED,
-            "No active USD budget is configured for this project.",
-            status_code=409,
-        )
-    if budget.spent_minor + budget.reserved_minor + ESTIMATED_COST_MINOR > budget.limit_minor:
-        raise RunSigilError(
-            ErrorCode.BUDGET_EXHAUSTED,
-            "The project budget is exhausted; the provider was not called.",
-            status_code=409,
-        )
-    now = database_now(session)
-    budget.reserved_minor += ESTIMATED_COST_MINOR
-    reservation = BudgetReservation(
-        id=uuid4(),
-        organization_id=organization_id,
-        budget_id=budget.id,
-        run_id=run_id,
-        amount_minor=ESTIMATED_COST_MINOR,
-        currency="USD",
-        status="active",
-        expires_at=now + timedelta(minutes=30),
-    )
-    session.add(reservation)
-    return reservation
-
-
 def create_governed_action(
     session: Session,
     *,
@@ -293,7 +270,16 @@ def create_governed_action(
         amount_minor=request.amount_cents,
         occurred_at=now,
     )
-    decision = evaluate(raw_bundle, policy_context)
+    with Operation(
+        "runsigil.policy.evaluate",
+        metric_name="runsigil.policy.evaluation.duration",
+        attributes={
+            "runsigil.action.type": ACTION_TYPE,
+            "runsigil.environment.type": environment.environment_type,
+            "runsigil.content_captured": False,
+        },
+    ):
+        decision = evaluate(raw_bundle, policy_context)
     if bundle is None or bundle.content_digest != decision.policy_digest:
         raise PolicyEvaluationError(
             ErrorCode.POLICY_UNAVAILABLE,
@@ -385,12 +371,29 @@ def create_governed_action(
         expires_at=decision.expires_at,
     )
     session.add(decision_record)
-    reservation = _reserve_budget(
-        session,
-        organization_id=context.organization_id,
-        project_id=project.id,
-        run_id=run.id,
-    )
+    with Operation(
+        "runsigil.budget.reserve",
+        metric_name="runsigil.budget.reservation.duration",
+        attributes={
+            "runsigil.run.id": str(run.id),
+            "runsigil.resource.count": len(ACTION_BUDGET_ESTIMATES),
+        },
+    ):
+        reservations = reserve_budgets(
+            session,
+            context=BudgetContext(
+                organization_id=context.organization_id,
+                project_id=project.id,
+                environment_id=environment.id,
+                agent_id=agent.id,
+                actor_id=context.actor_id,
+                actor_type=context.actor_type,
+            ),
+            run_id=run.id,
+            estimates=ACTION_BUDGET_ESTIMATES,
+            now=now,
+        )
+    reservation = next(row for row in reservations if row.resource_key == "currency:USD")
 
     approval: ApprovalRequest | None = None
     if decision.effect == DecisionEffect.REQUIRE_APPROVAL:
@@ -452,6 +455,12 @@ def create_governed_action(
     )
     session.add(action)
     session.flush()
+    link_action_reservations(
+        session,
+        organization_id=context.organization_id,
+        action_id=action.id,
+        reservations=reservations,
+    )
 
     run.status = "waiting_for_approval" if approval else "queued"
     run.active_node = "human-approval" if approval else "action-dispatch"
@@ -511,6 +520,7 @@ def create_governed_action(
             "decision": decision.effect.value,
             "approval_id": str(approval.id) if approval else None,
             "budget_reservation_id": str(reservation.id),
+            "budget_reservation_ids": [str(row.id) for row in reservations],
             "raw_content_captured": False,
         },
     )
@@ -576,15 +586,12 @@ def decide_approval(
         run.status = "cancelled"
         run.completed_at = now
         run.active_node = None
-        reservation = session.get(BudgetReservation, action.budget_reservation_id)
-        if reservation is not None and reservation.status == "active":
-            budget = session.scalar(
-                select(Budget).where(Budget.id == reservation.budget_id).with_for_update()
-            )
-            if budget is not None:
-                budget.reserved_minor -= reservation.amount_minor
-            reservation.status = "released"
-            reservation.reconciled_at = now
+        release_action_reservations(
+            session,
+            organization_id=context.organization_id,
+            action_id=action.id,
+            now=now,
+        )
         status = "denied"
     else:
         approval.status = "approved"
@@ -667,33 +674,12 @@ def cancel_run(
         .with_for_update()
     )
     intent = session.get(Intent, action.intent_id)
-    reservation = session.scalar(
-        select(BudgetReservation)
-        .where(BudgetReservation.id == action.budget_reservation_id)
-        .with_for_update()
-    )
-    if (
-        approval is None
-        or approval.status != "pending"
-        or intent is None
-        or reservation is None
-        or reservation.status != "active"
-    ):
+    if approval is None or approval.status != "pending" or intent is None:
         raise RunSigilError(
             ErrorCode.INVALID_TRANSITION,
             "Cancelable governance lineage is incomplete or stale.",
             status_code=409,
         )
-    budget = session.scalar(
-        select(Budget).where(Budget.id == reservation.budget_id).with_for_update()
-    )
-    if budget is None or budget.reserved_minor < reservation.amount_minor:
-        raise RunSigilError(
-            ErrorCode.INVALID_TRANSITION,
-            "The budget reservation cannot be released safely.",
-            status_code=409,
-        )
-
     now = database_now(session)
     approval.status = "denied"
     approval.decided_at = now
@@ -702,9 +688,12 @@ def cancel_run(
     action.state = "rejected"
     action.version += 1
     intent.status = "denied"
-    reservation.status = "released"
-    reservation.reconciled_at = now
-    budget.reserved_minor -= reservation.amount_minor
+    reservations = release_action_reservations(
+        session,
+        organization_id=context.organization_id,
+        action_id=action.id,
+        now=now,
+    )
     run.status = "cancelled"
     run.active_node = None
     run.completed_at = now
@@ -731,7 +720,7 @@ def cancel_run(
         content_digest=action.content_digest,
         metadata={
             "approval_id": str(approval.id),
-            "budget_reservation_id": str(reservation.id),
+            "budget_reservation_ids": [str(row.id) for row in reservations],
             "side_effect_started": False,
         },
     )
@@ -780,26 +769,45 @@ def authorize_gateway_action(
         )
     intent = session.get(Intent, action.intent_id)
     decision = session.get(PolicyDecisionRecord, action.policy_decision_id)
-    reservation = session.get(BudgetReservation, action.budget_reservation_id)
+    reservations = action_reservations(
+        session,
+        organization_id=action.organization_id,
+        action_id=action.id,
+    )
     run = session.get(Run, action.run_id)
-    if intent is None or decision is None or reservation is None or run is None:
+    if (
+        intent is None
+        or decision is None
+        or run is None
+        or not reservations
+        or action.budget_reservation_id not in {row.id for row in reservations}
+    ):
         raise RunSigilError(
             ErrorCode.ACTION_NOT_AUTHORIZED,
             "Action authorization lineage is incomplete.",
             status_code=409,
         )
     bundle = session.get(PolicyBundle, decision.policy_bundle_id)
-    if (
+    if bundle is None or bundle.content_digest != decision.policy_digest:
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Action governance lineage is unavailable or inconsistent.",
+            status_code=409,
+        )
+    if mode == "execute" and (
         decision.expires_at <= now
-        or bundle is None
         or bundle.status != "active"
-        or bundle.content_digest != decision.policy_digest
-        or reservation.status != "active"
-        or reservation.expires_at <= now
+        or any(row.status != "active" or row.expires_at <= now for row in reservations)
     ):
         raise RunSigilError(
             ErrorCode.ACTION_NOT_AUTHORIZED,
             "Action governance is stale or unavailable.",
+            status_code=409,
+        )
+    if mode == "reconcile" and any(row.status != "active" for row in reservations):
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Ambiguous-effect budget lineage is no longer reserved.",
             status_code=409,
         )
     if decision.effect == DecisionEffect.REQUIRE_APPROVAL.value:
@@ -840,7 +848,8 @@ def authorize_gateway_action(
         arguments_digest=intent.arguments_digest,
         decision_id=decision.id,
         approval_id=action.approval_request_id,
-        budget_reservation_id=reservation.id,
+        budget_reservation_id=action.budget_reservation_id,
+        budget_reservation_ids=[row.id for row in reservations],
     )
 
 
@@ -883,6 +892,7 @@ def run_detail(session: Session, run_id: UUID) -> dict[str, Any]:
                 "receipt_preview": action.receipt_preview_json,
                 "execute_attempts": action.execute_attempts,
                 "reconcile_attempts": action.reconcile_attempts,
+                "reconcile_cycle_attempts": action.reconcile_cycle_attempts,
                 "error_code": action.error_code,
             }
             if action is not None
@@ -906,6 +916,7 @@ def run_detail(session: Session, run_id: UUID) -> dict[str, Any]:
             {
                 "id": event.id,
                 "node_id": event.node_id,
+                "trace_id": event.trace_id,
                 "span_id": event.span_id,
                 "event_type": event.event_type,
                 "status": event.status,

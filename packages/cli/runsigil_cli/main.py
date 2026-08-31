@@ -16,10 +16,12 @@ system_app = typer.Typer(help="Inspect registered AI systems.")
 run_app = typer.Typer(help="Start and inspect governed runs.")
 approval_app = typer.Typer(help="Review exact-content approvals.")
 evidence_app = typer.Typer(help="Export and verify signed evidence.")
+dlq_app = typer.Typer(help="Inspect and safely redrive ambiguous actions.")
 app.add_typer(system_app, name="system")
 app.add_typer(run_app, name="run")
 app.add_typer(approval_app, name="approval")
 app.add_typer(evidence_app, name="evidence")
+app.add_typer(dlq_app, name="dlq")
 
 
 def _emit(value: Any, *, json_output: bool) -> None:
@@ -176,6 +178,36 @@ def approval_deny(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     _decide(approval_id, digest, "deny", reason, json_output)
+
+
+@dlq_app.command("list")
+def dlq_list(
+    status: Annotated[str, typer.Option()] = "open",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    try:
+        result = Client().request("GET", "/v1/dead-letters", params={"status": status})
+    except ApiError as exc:
+        _exit_for_error(exc, json_output=json_output)
+    _emit(result, json_output=json_output)
+
+
+@dlq_app.command("redrive")
+def dlq_redrive(
+    dead_letter_id: UUID,
+    expected_version: Annotated[int, typer.Option(min=1)],
+    reason: Annotated[str, typer.Option()] = "Operator requested bounded reconciliation",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    try:
+        result = Client().request(
+            "POST",
+            f"/v1/dead-letters/{dead_letter_id}/redrive",
+            json={"expected_version": expected_version, "reason": reason},
+        )
+    except ApiError as exc:
+        _exit_for_error(exc, json_output=json_output)
+    _emit(result, json_output=json_output)
 
 
 @evidence_app.command("export")

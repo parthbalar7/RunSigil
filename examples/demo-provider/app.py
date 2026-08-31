@@ -28,7 +28,7 @@ class EffectRequest(BaseModel):
 
 
 settings = Settings()
-app = FastAPI(title="RunSigil development provider", version="0.1.0")
+app = FastAPI(title="RunSigil development provider", version="0.2.0")
 effects: dict[str, dict[str, Any]] = {}
 lock = asyncio.Lock()
 

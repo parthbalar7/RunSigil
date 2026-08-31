@@ -51,6 +51,7 @@ class ActionSummary(BaseModel):
     receipt_preview: dict[str, Any] | None
     execute_attempts: int
     reconcile_attempts: int
+    reconcile_cycle_attempts: int
     error_code: str | None
 
 
@@ -58,6 +59,7 @@ class TraceEventSummary(BaseModel):
     id: UUID
     node_id: str
     span_id: str
+    trace_id: str
     event_type: str
     status: str
     sequence: int
@@ -96,6 +98,35 @@ class CursorPage(BaseModel):
     next_cursor: str | None
 
 
+class DeadLetterSummary(BaseModel):
+    id: UUID
+    action_id: UUID
+    run_id: UUID
+    source: str
+    reason_code: str
+    status: str
+    attempt_count: int
+    redrive_count: int
+    max_redrives: int
+    version: int
+    content_digest: str
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None
+
+
+class DeadLetterPage(BaseModel):
+    items: list[DeadLetterSummary]
+    next_cursor: str | None
+
+
+class DeadLetterRedriveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=2, max_length=500)
+
+
 class InternalAuthorizationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,3 +146,4 @@ class InternalAuthorizationResponse(BaseModel):
     decision_id: UUID
     approval_id: UUID | None
     budget_reservation_id: UUID
+    budget_reservation_ids: list[UUID]

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     action_encryption_key_b64: str
     approval_ttl_seconds: int = Field(default=900, ge=30, le=86_400)
     content_capture_enabled: bool = False
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
 
     @model_validator(mode="after")
     def validate_security(self) -> Settings:

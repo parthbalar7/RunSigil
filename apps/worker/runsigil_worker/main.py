@@ -6,11 +6,21 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from runsigil_telemetry import TelemetryConfig, configure_telemetry
 from sqlalchemy import text
 
 from runsigil_worker.service import ActionWorker
+from runsigil_worker.settings import get_worker_settings
 
-worker = ActionWorker()
+_settings = get_worker_settings()
+configure_telemetry(
+    TelemetryConfig(
+        service_name="runsigil-action-worker",
+        enabled=_settings.otel_enabled,
+        otlp_http_endpoint=_settings.otel_exporter_otlp_endpoint,
+    )
+)
+worker = ActionWorker(settings=_settings)
 stop_event = asyncio.Event()
 
 
@@ -22,7 +32,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await task
 
 
-app = FastAPI(title="RunSigil Action Worker", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="RunSigil Action Worker", version="0.2.0", lifespan=lifespan)
 
 
 @app.get("/health")

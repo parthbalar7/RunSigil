@@ -80,7 +80,7 @@ def _agent_card() -> JsonObject:
             }
         ],
         "provider": {"organization": "RunSigil", "url": "https://runsigil.io"},
-        "version": "0.1.0",
+        "version": "0.2.0",
         "capabilities": {
             "streaming": False,
             "pushNotifications": False,

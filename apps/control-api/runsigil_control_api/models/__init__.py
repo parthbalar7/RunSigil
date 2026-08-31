@@ -4,13 +4,16 @@ from runsigil_control_api.models.catalog import (
     AgentVersion,
     AISystem,
     Environment,
+    ModelRoute,
     Project,
     Tool,
 )
 from runsigil_control_api.models.evidence import EvidenceBundle
 from runsigil_control_api.models.execution import (
     Action,
+    ActionBudgetReservation,
     AuditEvent,
+    DeadLetter,
     Intent,
     OutboxEvent,
     Run,
@@ -20,6 +23,7 @@ from runsigil_control_api.models.governance import (
     ApprovalRequest,
     Budget,
     BudgetReservation,
+    BudgetScope,
     PolicyBundle,
     PolicyDecisionRecord,
 )
@@ -35,6 +39,7 @@ from runsigil_control_api.models.identity import (
 __all__ = [
     "AISystem",
     "Action",
+    "ActionBudgetReservation",
     "Agent",
     "AgentVersion",
     "ApiKey",
@@ -43,10 +48,13 @@ __all__ = [
     "Base",
     "Budget",
     "BudgetReservation",
+    "BudgetScope",
+    "DeadLetter",
     "Delegation",
     "Environment",
     "EvidenceBundle",
     "Intent",
+    "ModelRoute",
     "Organization",
     "OutboxEvent",
     "PolicyBundle",

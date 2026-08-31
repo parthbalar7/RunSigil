@@ -8,19 +8,22 @@
 | Governed transactional action | Implemented | Milestone 1 vertical slice |
 | API-key authentication and tenant RLS | Implemented | OIDC and enterprise federation are later work |
 | Policy | Implemented for allow/deny/approval | ABAC expansion and external policy bundles are later work |
-| Budget | Implemented for per-project currency | Other scopes and token/request quotas are later work |
+| Budget | Implemented | Organization/project/environment/agent/user/model-route scopes; currency, token, request, concurrency, tool-action, and model-call units |
 | Evidence | Ed25519 signed canonical JSON | WORM/timestamp export interfaces only; no production sink yet |
 | Protocol ingress | MCP `2026-07-28` and A2A `1.0` first vertical slice | Stateless tasks over durable Runs; optional streams and push are not implemented |
+| OpenTelemetry | Implemented | Privacy-safe GenAI agent/tool spans and duration metrics over OTLP; semantic conventions remain development-stability upstream |
+| Dead-letter queue | Implemented | Durable inspection and version-fenced bounded reconcile-only redrive for unresolved effects |
+| Framework adapters | Implemented | LangGraph `1.2.11` and OpenAI Agents `0.22.0`; adapters govern actions but do not host arbitrary agents |
 | Gateway | Stateless protocol ingress plus fixed-route guarded egress | General connectors are not implemented |
 | Worker | Durable action executor/reconciler | Not a general agent process executor |
 | Web UI | Governed run and approval operator flow | Broader product surfaces are intentionally absent |
 | Kubernetes and cloud | Development manifests only | Milestone 5 |
-| Remaining Milestone 2 | Not implemented | OpenTelemetry GenAI conventions, expanded budgets, DLQ tooling, and framework adapters |
+| Milestone 2 reference slice | Implemented | MCP/A2A ingress, telemetry, hierarchical budgets, DLQ, and two framework adapters |
 
 ## System shape
 
 ```text
-CLI / React operator UI       MCP / A2A clients
+CLI / React operator UI       MCP / A2A clients       Framework adapters
           |
           |                       |
           | hashed API key       | scoped bearer API key
@@ -39,6 +42,10 @@ transactional outbox (PostgreSQL, polled in this slice)
                              v
                     dedicated action worker
                              |
+                   bounded reconciliation
+                             |
+                  durable dead-letter record
+                             |
                     commit `executing` claim
                              |
                              v
@@ -50,12 +57,16 @@ transactional outbox (PostgreSQL, polled in this slice)
                              |
                              v
                     example external provider
+
+API / worker / gateway / adapters --OTLP--> OpenTelemetry collector
 ```
 
 The API creates a `Run`, exact `Intent`, canonical action digest, `PolicyDecision`,
-`BudgetReservation`, `Action`, trace events, audit event, and `OutboxEvent` in one
-database transaction. If approval is required, the action is not executable until a
-one-use `ApprovalRequest` bound to the same digest is accepted.
+all applicable `BudgetReservation` rows, `Action`, trace events, audit event, and
+`OutboxEvent` in one database transaction. Budget rows are locked in a stable order,
+so concurrent requests cannot both spend the same remaining quota. If approval is
+required, the action is not executable until a one-use `ApprovalRequest` bound to the
+same digest is accepted.
 
 The worker claims only approved actions from PostgreSQL. Redis is present in the
 development topology for the later notification fast path, but is not authority and
@@ -64,12 +75,22 @@ network call. The gateway asks the API to revalidate action state, content diges
 policy decision, approval, budget reservation, and lease immediately before egress.
 The gateway never forwards the caller's API key; it mints a short-lived credential
 whose audience is the fixed provider. Provider ambiguity moves the action to
-`reconciliation_required`, never to success and never to a blind retry.
+`reconciliation_required`, never to success and never to a blind retry. Repeated
+unknown reconciliation outcomes reach a durable `DeadLetter`; an operator may use a
+version-fenced bounded redrive that performs reconciliation only. Active reservations
+stay held while the effect remains unknown.
 
 MCP and A2A ingress reuse the same Run UUID and control-plane state; the gateway has
 no protocol task database. Exact-content approval responses call the existing
 single-use approval transition. Cancellation is accepted only at the pre-effect
 approval boundary; once work is queued or executing, it fails closed.
+
+LangGraph maps its checkpointed interrupt/resume boundary to the exact RunSigil
+approval. The OpenAI Agents adapter uses a native function-tool interruption and
+bridges the approved tool call to the RunSigil approval under the authenticated API
+actor. Neither adapter records raw prompts or model outputs. OTLP spans use GenAI
+`invoke_agent` and `execute_tool` operation names plus RunSigil correlation IDs; raw
+arguments, prompts, and outputs are absent from span attributes by default.
 
 ## Data and tenancy
 
@@ -110,9 +131,11 @@ runtime credential.
 | Approval digest mismatch/expired/replayed | Denied; action remains non-executable |
 | Crash before claim commit | Action remains approved and may be claimed |
 | Crash after claim, before receipt | Lease expires; reconcile provider state |
-| Provider returns ambiguity or times out | `reconciliation_required` |
+| Provider returns ambiguity or times out | `reconciliation_required`; only provider reconciliation follows |
+| Reconciliation remains unknown at the configured bound | Durable `dead_lettered` action/run; reservations remain held |
+| Operator redrives an open dead letter | Version-fenced, audited reconciliation only; bounded count |
 | Provider confirms committed | Store redacted receipt; complete action/run |
-| Provider confirms absent | Operator-authorized bounded redrive may reuse the key |
+| Provider confirms absent | Terminal failure; no blind execution redrive |
 | API unavailable during gateway recheck | Gateway denies egress |
 | Evidence content modified | Offline signature verification fails |
 | MCP header/body version, method, or tool mismatch | Request rejected before dispatch |
@@ -126,5 +149,6 @@ token issuer are trusted components. PostgreSQL RLS constrains runtime roles but
 does not constrain the database owner. The example provider demonstrates protocol
 behavior; it is not a production connector. This slice does not claim exactly-once
 external effects, arbitrary agent isolation, kernel sensing, external timestamping,
-MCP server sessions/streams, A2A streaming/push, framework adapters, or production
-readiness.
+MCP server sessions/streams, A2A streaming/push, or production readiness.
+OpenTelemetry GenAI semantic conventions are emitted at their current upstream
+development stability and may require future compatibility updates.

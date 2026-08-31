@@ -288,7 +288,7 @@ async def _dispatch(
             "_meta": {
                 "io.modelcontextprotocol/serverInfo": {
                     "name": "runsigil-governance-gateway",
-                    "version": "0.1.0",
+                    "version": "0.2.0",
                 }
             },
             "instructions": (

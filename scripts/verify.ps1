@@ -20,8 +20,8 @@ function Invoke-Checked {
 
 Push-Location $repositoryRoot
 try {
-    Invoke-Checked { & $python -m ruff check apps packages tests examples } "Ruff lint"
-    Invoke-Checked { & $python -m ruff format --check apps packages tests examples } "Ruff format"
+    Invoke-Checked { & $python -m ruff check apps packages adapters tests examples } "Ruff lint"
+    Invoke-Checked { & $python -m ruff format --check apps packages adapters tests examples } "Ruff format"
     Invoke-Checked { & $python -m mypy } "Mypy strict type checking"
     Invoke-Checked {
         & $python -m pytest tests/unit tests/security/test_deployment_static.py -q -p no:cacheprovider

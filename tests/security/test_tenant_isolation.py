@@ -17,6 +17,8 @@ SYSTEM_B = UUID("90000000-0000-4000-8000-000000000004")
 WORKLOAD_B = UUID("90000000-0000-4000-8000-000000000005")
 AGENT_B = UUID("90000000-0000-4000-8000-000000000006")
 RUN_B = UUID("90000000-0000-4000-8000-000000000007")
+MODEL_ROUTE_B = UUID("90000000-0000-4000-8000-000000000009")
+BUDGET_SCOPE_B = UUID("90000000-0000-4000-8000-000000000010")
 
 
 def seed_org_b(owner_url: str) -> None:
@@ -80,6 +82,23 @@ def seed_org_b(owner_url: str) -> None:
         )
         connection.execute(
             text(
+                "INSERT INTO model_routes "
+                "(id, organization_id, project_id, name, provider, model, status) "
+                "VALUES (:id, :org, :project, 'private route', 'private', "
+                "'private-model', 'active') ON CONFLICT (id) DO NOTHING"
+            ),
+            {"id": MODEL_ROUTE_B, "org": ORG_B, "project": PROJECT_B},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO budget_scopes "
+                "(id, organization_id, scope_type, project_id) "
+                "VALUES (:id, :org, 'project', :project) ON CONFLICT (id) DO NOTHING"
+            ),
+            {"id": BUDGET_SCOPE_B, "org": ORG_B, "project": PROJECT_B},
+        )
+        connection.execute(
+            text(
                 "INSERT INTO runs "
                 "(id, organization_id, project_id, environment_id, agent_id, actor_id, "
                 "status, idempotency_key, input_digest) "
@@ -131,3 +150,22 @@ def test_org_a_cannot_read_org_b_through_api_or_direct_app_role(
             text("UPDATE runs SET status = 'cancelled' WHERE id = :id"), {"id": RUN_B}
         )
         assert result.rowcount == 0
+        assert connection.scalar(text("SELECT count(*) FROM model_routes")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM budget_scopes")) == 6
+
+    owner_engine = create_engine(database_urls["owner"])
+    with owner_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
+                "WHERE relname IN ('model_routes','budget_scopes',"
+                "'action_budget_reservations','dead_letters')"
+            )
+        ).all()
+    assert {row.relname for row in rows} == {
+        "model_routes",
+        "budget_scopes",
+        "action_budget_reservations",
+        "dead_letters",
+    }
+    assert all(row.relrowsecurity and row.relforcerowsecurity for row in rows)

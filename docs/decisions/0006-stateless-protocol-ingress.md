@@ -29,6 +29,5 @@ still `proposed`. This boundary is before outbox dispatch and external I/O. Queu
 running, completed, failed, and ambiguous Runs fail cancellation closed until a later
 fenced cancellation design exists.
 
-This decision implements the protocol-ingress part of Milestone 2. OpenTelemetry
-GenAI conventions, expanded budget scopes, DLQ tooling, and framework adapters remain
-separate work and are not implied by these endpoints.
+This decision implements the protocol-ingress part of Milestone 2. ADRs 0007-0009
+complete the separate budget, DLQ, telemetry, and framework-adapter boundaries.

@@ -17,6 +17,11 @@ class WorkerSettings(BaseSettings):
     evidence_ed25519_private_key_b64: str
     evidence_signing_key_id: str = "development-2026-01"
     action_lease_seconds: int = Field(default=30, ge=5, le=3_600)
+    max_reconciliation_attempts: int = Field(default=3, ge=1, le=100)
+    max_dlq_redrives: int = Field(default=2, ge=0, le=20)
+    reconciliation_delay_seconds: int = Field(default=5, ge=1, le=3_600)
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
 
     @model_validator(mode="after")
     def production_guards(self) -> WorkerSettings:

@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,14 +14,17 @@ from runsigil_control_api.models import (
     Action,
     ApprovalRequest,
     AuditEvent,
-    Budget,
-    BudgetReservation,
+    DeadLetter,
     EvidenceBundle,
     Intent,
     OutboxEvent,
     PolicyDecisionRecord,
     Run,
     TraceEvent,
+)
+from runsigil_control_api.services.budgets import (
+    action_reservations,
+    settle_action_reservations,
 )
 from runsigil_control_api.services.governed_actions import (
     _audit,
@@ -144,6 +147,7 @@ class ActionWorker:
             action.claim_token_hash = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
             action.lease_expires_at = now + timedelta(seconds=self.settings.action_lease_seconds)
             action.reconcile_attempts += 1
+            action.reconcile_cycle_attempts += 1
             _trace(
                 session,
                 organization_id=action.organization_id,
@@ -151,7 +155,11 @@ class ActionWorker:
                 node_id="action-reconciliation",
                 event_type="action.reconciliation_claimed",
                 status="running",
-                attributes={"action_id": str(action.id), "attempt": action.reconcile_attempts},
+                attributes={
+                    "action_id": str(action.id),
+                    "attempt": action.reconcile_attempts,
+                    "cycle_attempt": action.reconcile_cycle_attempts,
+                },
             )
             return ClaimedAction(
                 action_id=action.id,
@@ -209,14 +217,6 @@ class ActionWorker:
                 return
             now = database_now(session)
             run = session.get(Run, action.run_id)
-            reservation = session.get(BudgetReservation, action.budget_reservation_id)
-            budget = (
-                session.scalar(
-                    select(Budget).where(Budget.id == reservation.budget_id).with_for_update()
-                )
-                if reservation is not None
-                else None
-            )
             if result.outcome == "committed":
                 action.state = "committed"
                 action.receipt_preview_json = result.receipt_preview
@@ -227,15 +227,13 @@ class ActionWorker:
                     run.status = "completed"
                     run.active_node = None
                     run.completed_at = now
-                if (
-                    reservation is not None
-                    and reservation.status == "active"
-                    and budget is not None
-                ):
-                    budget.reserved_minor -= reservation.amount_minor
-                    budget.spent_minor += reservation.amount_minor
-                    reservation.status = "committed"
-                    reservation.reconciled_at = now
+                settle_action_reservations(
+                    session,
+                    organization_id=action.organization_id,
+                    action_id=action.id,
+                    now=now,
+                    committed=True,
+                )
                 status = "committed"
             elif result.outcome == "failed":
                 action.state = "failed"
@@ -246,25 +244,33 @@ class ActionWorker:
                     run.active_node = None
                     run.error_code = action.error_code
                     run.completed_at = now
-                if (
-                    reservation is not None
-                    and reservation.status == "active"
-                    and budget is not None
-                ):
-                    budget.reserved_minor -= reservation.amount_minor
-                    reservation.status = "released"
-                    reservation.reconciled_at = now
+                settle_action_reservations(
+                    session,
+                    organization_id=action.organization_id,
+                    action_id=action.id,
+                    now=now,
+                    committed=False,
+                )
                 status = "failed"
             else:
-                action.state = "reconciliation_required"
                 action.error_code = result.error_code or "provider_outcome_ambiguous"
-                action.next_reconcile_at = now + timedelta(seconds=5)
                 action.lease_expires_at = None
-                if run is not None:
-                    run.status = "reconciliation_required"
-                    run.active_node = "action-reconciliation"
-                    run.error_code = action.error_code
-                status = "ambiguous"
+                if (
+                    claim.mode == "reconcile"
+                    and action.reconcile_cycle_attempts >= self.settings.max_reconciliation_attempts
+                ):
+                    self._dead_letter(session, action, run, now)
+                    status = "dead_lettered"
+                else:
+                    action.state = "reconciliation_required"
+                    action.next_reconcile_at = now + timedelta(
+                        seconds=self.settings.reconciliation_delay_seconds
+                    )
+                    if run is not None:
+                        run.status = "reconciliation_required"
+                        run.active_node = "action-reconciliation"
+                        run.error_code = action.error_code
+                    status = "ambiguous"
             action.version += 1
             outbox = session.scalar(
                 select(OutboxEvent)
@@ -273,7 +279,7 @@ class ActionWorker:
                 .limit(1)
                 .with_for_update()
             )
-            if outbox is not None and result.outcome != "ambiguous":
+            if outbox is not None and status in {"committed", "failed", "dead_lettered"}:
                 outbox.processed_at = now
             _trace(
                 session,
@@ -305,7 +311,62 @@ class ActionWorker:
                 },
             )
             if result.outcome in {"committed", "failed"}:
+                dead_letter = session.scalar(
+                    select(DeadLetter).where(DeadLetter.action_id == action.id).with_for_update()
+                )
+                if dead_letter is not None and dead_letter.status != "resolved":
+                    dead_letter.status = "resolved"
+                    dead_letter.resolved_at = now
+                    dead_letter.version += 1
                 self._create_evidence(session, action)
+
+    def _dead_letter(
+        self,
+        session: Session,
+        action: Action,
+        run: Run | None,
+        now: datetime,
+    ) -> None:
+        outbox = session.scalar(
+            select(OutboxEvent)
+            .where(OutboxEvent.aggregate_id == action.id, OutboxEvent.topic == "action.ready")
+            .order_by(OutboxEvent.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        dead_letter = session.scalar(
+            select(DeadLetter).where(DeadLetter.action_id == action.id).with_for_update()
+        )
+        if dead_letter is None:
+            dead_letter = DeadLetter(
+                id=uuid4(),
+                organization_id=action.organization_id,
+                action_id=action.id,
+                run_id=action.run_id,
+                outbox_event_id=outbox.id if outbox is not None else None,
+                source="action-reconciliation",
+                reason_code=action.error_code or "provider_outcome_ambiguous",
+                status="open",
+                attempt_count=action.reconcile_attempts,
+                redrive_count=0,
+                max_redrives=self.settings.max_dlq_redrives,
+                version=1,
+                content_digest=action.content_digest,
+                resolved_at=None,
+            )
+            session.add(dead_letter)
+        else:
+            dead_letter.status = "open"
+            dead_letter.reason_code = action.error_code or "provider_outcome_ambiguous"
+            dead_letter.attempt_count = action.reconcile_attempts
+            dead_letter.version += 1
+            dead_letter.resolved_at = None
+        action.state = "dead_lettered"
+        action.next_reconcile_at = None
+        if run is not None:
+            run.status = "dead_lettered"
+            run.active_node = None
+            run.error_code = action.error_code
 
     def _create_evidence(self, session: Session, action: Action) -> None:
         if (
@@ -321,7 +382,11 @@ class ActionWorker:
             if action.approval_request_id
             else None
         )
-        reservation = session.get(BudgetReservation, action.budget_reservation_id)
+        reservations = action_reservations(
+            session,
+            organization_id=action.organization_id,
+            action_id=action.id,
+        )
         traces = list(
             session.scalars(
                 select(TraceEvent)
@@ -336,7 +401,8 @@ class ActionWorker:
                 .order_by(AuditEvent.sequence)
             )
         )
-        if run is None or intent is None or decision is None or reservation is None:
+        dead_letter = session.scalar(select(DeadLetter).where(DeadLetter.action_id == action.id))
+        if run is None or intent is None or decision is None or not reservations:
             raise RuntimeError("cannot seal incomplete action lineage")
         manifest = {
             "schema": "runsigil.evidence/v1",
@@ -381,12 +447,29 @@ class ActionWorker:
                 if approval is not None
                 else None
             ),
-            "budget": {
-                "reservation_id": str(reservation.id),
-                "amount_minor": reservation.amount_minor,
-                "currency": reservation.currency,
-                "status": reservation.status,
-            },
+            "budgets": [
+                {
+                    "reservation_id": str(reservation.id),
+                    "resource_key": reservation.resource_key,
+                    "estimated_value": reservation.estimated_value,
+                    "actual_value": reservation.actual_value,
+                    "status": reservation.status,
+                }
+                for reservation in reservations
+            ],
+            "dead_letter": (
+                {
+                    "id": str(dead_letter.id),
+                    "status": dead_letter.status,
+                    "reason_code": dead_letter.reason_code,
+                    "attempt_count": dead_letter.attempt_count,
+                    "redrive_count": dead_letter.redrive_count,
+                    "max_redrives": dead_letter.max_redrives,
+                    "version": dead_letter.version,
+                }
+                if dead_letter is not None
+                else None
+            ),
             "trace": [
                 {
                     "id": str(event.id),

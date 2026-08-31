@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from runsigil_contracts import canonical_digest
 from sqlalchemy import create_engine
@@ -14,7 +14,9 @@ from runsigil_control_api.models import (
     AISystem,
     ApiKey,
     Budget,
+    BudgetScope,
     Environment,
+    ModelRoute,
     Organization,
     PolicyBundle,
     Project,
@@ -39,7 +41,114 @@ IDS = {
     "tool": UUID("60000000-0000-4000-8000-000000000001"),
     "policy": UUID("70000000-0000-4000-8000-000000000001"),
     "budget": UUID("80000000-0000-4000-8000-000000000001"),
+    "model_route": UUID("60000000-0000-4000-8000-000000000002"),
 }
+
+BOOTSTRAP_SCOPES = [
+    "context:read",
+    "run:write",
+    "run:read",
+    "approval:read",
+    "approval:decide",
+    "evidence:read",
+    "dlq:read",
+    "dlq:redrive",
+]
+
+RESOURCE_LIMITS = {
+    "currency:USD": 1_000,
+    "tokens": 1_000_000,
+    "requests": 10_000,
+    "concurrent_runs": 100,
+    "tool_actions": 10_000,
+    "model_calls": 10_000,
+}
+
+
+def _stable_id(kind: str, value: str) -> UUID:
+    return uuid5(NAMESPACE_URL, f"https://runsigil.io/seed/{kind}/{value}")
+
+
+def _seed_milestone_two(session: Session) -> None:
+    organization_id = IDS["organization"]
+    route = session.get(ModelRoute, IDS["model_route"])
+    if route is None:
+        route = ModelRoute(
+            id=IDS["model_route"],
+            organization_id=organization_id,
+            project_id=IDS["project"],
+            name="demo-model-route",
+            provider="demo",
+            model="demo-governed-model",
+            status="active",
+        )
+        session.add(route)
+        session.flush()
+
+    scope_targets: list[tuple[str, str, UUID | None]] = [
+        ("organization", "organization", None),
+        ("project", "project_id", IDS["project"]),
+        ("environment", "environment_id", IDS["environment"]),
+        ("agent", "agent_id", IDS["agent"]),
+        ("user", "user_id", IDS["user"]),
+        ("model_route", "model_route_id", IDS["model_route"]),
+    ]
+    scopes: list[BudgetScope] = []
+    for scope_type, target_column, target_id in scope_targets:
+        statement = session.query(BudgetScope).filter(BudgetScope.scope_type == scope_type)
+        if target_id is not None:
+            statement = statement.filter(getattr(BudgetScope, target_column) == target_id)
+        scope = statement.one_or_none()
+        if scope is None:
+            values: dict[str, UUID | None] = {
+                "project_id": None,
+                "environment_id": None,
+                "agent_id": None,
+                "user_id": None,
+                "model_route_id": None,
+            }
+            if target_id is not None:
+                values[target_column] = target_id
+            scope = BudgetScope(
+                id=_stable_id("budget-scope", f"{scope_type}:{target_id or organization_id}"),
+                organization_id=organization_id,
+                scope_type=scope_type,
+                **values,
+            )
+            session.add(scope)
+            session.flush()
+        scopes.append(scope)
+
+    for scope in scopes:
+        for resource_key, base_limit in RESOURCE_LIMITS.items():
+            budget = (
+                session.query(Budget)
+                .filter(
+                    Budget.budget_scope_id == scope.id,
+                    Budget.resource_key == resource_key,
+                )
+                .one_or_none()
+            )
+            if budget is not None:
+                budget.active = True
+                continue
+            budget_id = (
+                IDS["budget"]
+                if scope.scope_type == "project" and resource_key == "currency:USD"
+                else _stable_id("budget", f"{scope.id}:{resource_key}")
+            )
+            session.add(
+                Budget(
+                    id=budget_id,
+                    organization_id=organization_id,
+                    budget_scope_id=scope.id,
+                    resource_key=resource_key,
+                    limit_value=base_limit,
+                    reserved_value=0,
+                    spent_value=0,
+                    active=True,
+                )
+            )
 
 
 def seed() -> None:
@@ -53,6 +162,8 @@ def seed() -> None:
             existing = session.get(ApiKey, IDS["api_key"])
             if existing is not None:
                 existing.key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+                existing.scopes_json = BOOTSTRAP_SCOPES
+            _seed_milestone_two(session)
             return
         organization_id = IDS["organization"]
         session.add(Organization(id=organization_id, slug="sigil-labs", name="Sigil Labs"))
@@ -74,14 +185,7 @@ def seed() -> None:
                 key_hash=hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
                 actor_id=IDS["user"],
                 actor_type="user",
-                scopes_json=[
-                    "context:read",
-                    "run:write",
-                    "run:read",
-                    "approval:read",
-                    "approval:decide",
-                    "evidence:read",
-                ],
+                scopes_json=BOOTSTRAP_SCOPES,
                 active=True,
             )
         )
@@ -198,17 +302,8 @@ def seed() -> None:
                 content_digest=canonical_digest(policy_document),
             )
         )
-        session.add(
-            Budget(
-                id=IDS["budget"],
-                organization_id=organization_id,
-                project_id=IDS["project"],
-                currency="USD",
-                limit_minor=1_000,
-                reserved_minor=0,
-                spent_minor=0,
-            )
-        )
+        session.flush()
+        _seed_milestone_two(session)
 
 
 if __name__ == "__main__":

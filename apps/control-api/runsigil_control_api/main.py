@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from runsigil_contracts.errors import RunSigilError
+from runsigil_telemetry import TelemetryConfig, configure_telemetry
 from sqlalchemy import text
 
 from runsigil_control_api.database import SessionLocal
@@ -15,9 +16,18 @@ from runsigil_control_api.routers.core import router as core_router
 from runsigil_control_api.routers.internal import router as internal_router
 from runsigil_control_api.settings import get_settings
 
+_settings = get_settings()
+configure_telemetry(
+    TelemetryConfig(
+        service_name="runsigil-control-api",
+        enabled=_settings.otel_enabled,
+        otlp_http_endpoint=_settings.otel_exporter_otlp_endpoint,
+    )
+)
+
 app = FastAPI(
     title="RunSigil Control API",
-    version="0.1.0",
+    version="0.2.0",
     description="Content-bound governance for agent actions.",
 )
 app.add_middleware(

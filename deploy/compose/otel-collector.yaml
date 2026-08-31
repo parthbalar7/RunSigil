@@ -19,7 +19,7 @@ exporters:
 service:
   telemetry:
     logs:
-      level: warn
+      level: info
   pipelines:
     traces:
       receivers: [otlp]
@@ -29,4 +29,3 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug]
-

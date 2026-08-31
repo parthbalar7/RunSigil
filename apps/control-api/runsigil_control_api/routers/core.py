@@ -6,18 +6,23 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
+from runsigil_telemetry import Operation
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from runsigil_control_api.auth import AuthContext, require_scopes, tenant_session
-from runsigil_control_api.models import ApprovalRequest, EvidenceBundle, Run, TraceEvent
+from runsigil_control_api.models import ApprovalRequest, DeadLetter, EvidenceBundle, Run, TraceEvent
 from runsigil_control_api.schemas import (
     ApprovalDecisionInput,
     ContextResponse,
+    DeadLetterPage,
+    DeadLetterRedriveInput,
+    DeadLetterSummary,
     GovernedActionInput,
     RunDetail,
     RunListPage,
 )
+from runsigil_control_api.services.dead_letters import dead_letter_summary, redrive_dead_letter
 from runsigil_control_api.services.governed_actions import (
     cancel_run,
     context_snapshot,
@@ -58,6 +63,7 @@ RUN_STATUSES = frozenset(
         "failed",
         "cancelled",
         "reconciliation_required",
+        "dead_lettered",
     }
 )
 
@@ -220,16 +226,89 @@ def approval_decision(
     context: Annotated[AuthContext, Depends(require_scopes("approval:decide"))],
     session: Annotated[Session, Depends(tenant_session)],
 ) -> dict[str, Any]:
-    run = decide_approval(
+    with Operation(
+        "runsigil.approval.decide",
+        metric_name="runsigil.approval.decision.duration",
+        attributes={
+            "runsigil.approval.id": str(approval_id),
+            "runsigil.approval.decision": request.decision,
+            "runsigil.content_captured": False,
+        },
+    ):
+        run = decide_approval(
+            session,
+            context=context,
+            approval_id=approval_id,
+            submitted_digest=request.content_digest,
+            decision=request.decision,
+            reason=request.reason,
+        )
+    session.flush()
+    return run_detail(session, run.id)
+
+
+@router.get("/dead-letters", response_model=DeadLetterPage)
+def list_dead_letters(
+    _context: Annotated[AuthContext, Depends(require_scopes("dlq:read"))],
+    session: Annotated[Session, Depends(tenant_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: str | None = None,
+    dead_letter_status: Annotated[str | None, Query(alias="status")] = "open",
+) -> dict[str, Any]:
+    statement = select(DeadLetter)
+    if dead_letter_status:
+        if dead_letter_status not in {"open", "redriven", "resolved"}:
+            from runsigil_contracts.errors import ErrorCode, RunSigilError
+
+            raise RunSigilError(
+                ErrorCode.VALIDATION_FAILED,
+                "The dead-letter status is invalid.",
+                status_code=422,
+            )
+        statement = statement.where(DeadLetter.status == dead_letter_status)
+    if cursor:
+        try:
+            created_at, row_id = _decode_cursor(cursor)
+        except (ValueError, UnicodeDecodeError):
+            from runsigil_contracts.errors import ErrorCode, RunSigilError
+
+            raise RunSigilError(
+                ErrorCode.VALIDATION_FAILED,
+                "The dead-letter cursor is invalid.",
+                status_code=422,
+            ) from None
+        statement = statement.where(
+            or_(
+                DeadLetter.created_at < created_at,
+                and_(DeadLetter.created_at == created_at, DeadLetter.id < row_id),
+            )
+        )
+    rows = list(
+        session.scalars(
+            statement.order_by(DeadLetter.created_at.desc(), DeadLetter.id.desc()).limit(limit + 1)
+        )
+    )
+    page = rows[:limit]
+    next_cursor = _encode_cursor(page[-1].created_at, page[-1].id) if len(rows) > limit else None
+    return {"items": [dead_letter_summary(row) for row in page], "next_cursor": next_cursor}
+
+
+@router.post("/dead-letters/{dead_letter_id}/redrive", response_model=DeadLetterSummary)
+def redrive_dead_letter_endpoint(
+    dead_letter_id: UUID,
+    request: DeadLetterRedriveInput,
+    context: Annotated[AuthContext, Depends(require_scopes("dlq:redrive"))],
+    session: Annotated[Session, Depends(tenant_session)],
+) -> dict[str, object]:
+    row = redrive_dead_letter(
         session,
         context=context,
-        approval_id=approval_id,
-        submitted_digest=request.content_digest,
-        decision=request.decision,
+        dead_letter_id=dead_letter_id,
+        expected_version=request.expected_version,
         reason=request.reason,
     )
     session.flush()
-    return run_detail(session, run.id)
+    return dead_letter_summary(row)
 
 
 @router.get("/runs/{run_id}/evidence")
