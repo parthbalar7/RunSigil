@@ -1,0 +1,10 @@
+RunSigil
+Copyright 2026 RunSigil contributors
+
+This product includes software developed by RunSigil contributors and third-party
+open-source dependencies whose licenses are distributed with their packages.
+
+The AgentDock/Berthline repository was studied as a read-only architectural
+reference. No Berthline source code is included in RunSigil. See
+docs/reuse-assessment.md.
+

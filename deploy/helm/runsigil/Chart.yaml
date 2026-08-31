@@ -1,0 +1,8 @@
+apiVersion: v2
+name: runsigil
+description: Experimental RunSigil Milestone 1 control-plane chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"
+

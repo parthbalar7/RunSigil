@@ -1,0 +1,1 @@
+"""RunSigil command-line interface."""

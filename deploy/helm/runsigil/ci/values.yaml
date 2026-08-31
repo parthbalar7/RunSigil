@@ -1,0 +1,7 @@
+images:
+  controlApi: { repository: ghcr.io/runsigil/control-api, digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+  worker: { repository: ghcr.io/runsigil/worker, digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+  gateway: { repository: ghcr.io/runsigil/gateway, digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+  web: { repository: ghcr.io/runsigil/web, digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+  migrator: { repository: ghcr.io/runsigil/migrator, digest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }
+

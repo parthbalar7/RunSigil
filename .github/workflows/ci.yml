@@ -1,0 +1,98 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install locked Python environment
+        run: |
+          python -m pip install uv==0.11.20
+          uv sync --frozen --extra dev
+      - name: Python static and unit verification
+        run: |
+          uv run ruff check apps packages tests examples
+          uv run ruff format --check apps packages tests examples
+          uv run mypy
+          uv run pytest tests/unit tests/security/test_deployment_static.py -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Web verification
+        run: |
+          npm --prefix apps/web ci
+          npm --prefix apps/web test
+          npm --prefix apps/web run build
+          npm --prefix apps/web audit --audit-level=high
+
+  postgres-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install locked Python environment
+        run: |
+          python -m pip install uv==0.11.20
+          uv sync --frozen --extra dev
+      - name: Create isolated CI configuration
+        shell: bash
+        run: |
+          cp .env.example .env
+          sed -i 's|RUNSIGIL_ACTION_ENCRYPTION_KEY_B64=.*|RUNSIGIL_ACTION_ENCRYPTION_KEY_B64=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=|' .env
+          sed -i 's|RUNSIGIL_EVIDENCE_ED25519_PRIVATE_KEY_B64=.*|RUNSIGIL_EVIDENCE_ED25519_PRIVATE_KEY_B64=ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=|' .env
+          sed -i 's|RUNSIGIL_BOOTSTRAP_API_KEY=.*|RUNSIGIL_BOOTSTRAP_API_KEY=rsk_dev_test_bootstrap_key_000001|' .env
+      - name: Migrate and seed PostgreSQL
+        run: |
+          docker compose --env-file .env -p runsigil-ci -f deploy/compose/compose.yaml up -d --wait postgres
+          docker compose --env-file .env -p runsigil-ci -f deploy/compose/compose.yaml run --rm migrator
+      - name: Integration and security proofs
+        env:
+          RUNSIGIL_BOOTSTRAP_API_KEY: rsk_dev_test_bootstrap_key_000001
+          RUNSIGIL_TEST_DATABASE_URL: postgresql+psycopg://runsigil_app:change-me-app@127.0.0.1:55432/runsigil
+          RUNSIGIL_TEST_WORKER_DATABASE_URL: postgresql+psycopg://runsigil_worker:change-me-worker@127.0.0.1:55432/runsigil
+          RUNSIGIL_TEST_GATEWAY_AUTHORIZATION_DATABASE_URL: postgresql+psycopg://runsigil_gateway_authorizer:change-me-gateway-auth@127.0.0.1:55432/runsigil
+          RUNSIGIL_TEST_OWNER_DATABASE_URL: postgresql+psycopg://runsigil_owner:change-me-owner@127.0.0.1:55432/runsigil
+        run: uv run pytest tests/integration tests/security -q
+      - name: Collect service diagnostics
+        if: failure()
+        run: docker compose --env-file .env -p runsigil-ci -f deploy/compose/compose.yaml logs --no-color
+      - name: Remove isolated CI resources
+        if: always()
+        run: docker compose --env-file .env -p runsigil-ci -f deploy/compose/compose.yaml down --volumes
+
+  deployment-contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.3.1
+        with:
+          version: v3.18.6
+      - name: Validate Compose interpolation
+        shell: bash
+        run: |
+          cp .env.example .env
+          docker compose --env-file .env -p runsigil-ci -f deploy/compose/compose.yaml config --quiet
+      - name: Validate Helm chart and security context
+        shell: pwsh
+        run: ./deploy/helm/runsigil/ci/verify.ps1

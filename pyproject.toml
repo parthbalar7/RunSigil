@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runsigil"
+version = "0.1.0"
+description = "Govern every agent run."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "RunSigil contributors" }]
+dependencies = [
+  "alembic==1.14.0",
+  "cryptography==48.0.1",
+  "fastapi==0.139.0",
+  "httpx==0.28.1",
+  "psycopg[binary]==3.2.3",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.7.1",
+  "sqlalchemy==2.0.36",
+  "typer==0.26.8",
+  "uvicorn[standard]==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.14.1",
+  "pytest==8.3.4",
+  "pytest-cov==6.0.0",
+  "pytest-asyncio==0.25.3",
+  "ruff==0.9.2",
+]
+
+[project.scripts]
+runsigil = "runsigil_cli.main:app"
+runsigil-api = "runsigil_control_api.main:run"
+runsigil-worker = "runsigil_worker.main:run"
+runsigil-gateway = "runsigil_gateway.main:run"
+
+[tool.setuptools.packages.find]
+where = [
+  "apps/control-api",
+  "apps/worker",
+  "apps/gateway",
+  "packages/contracts",
+  "packages/policy",
+  "packages/evidence",
+  "packages/cli",
+]
+include = ["runsigil_*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "integration: requires the isolated RunSigil PostgreSQL test database",
+  "security: security invariant proof",
+  "e2e: multi-service end-to-end proof",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+  ".codex-tmp",
+  ".venv",
+  "apps/control-api/alembic/versions",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = [
+  "apps/control-api",
+  "apps/worker",
+  "apps/gateway",
+  "packages/contracts",
+  "packages/policy",
+  "packages/evidence",
+  "packages/cli",
+]
+packages = [
+  "runsigil_contracts",
+  "runsigil_policy",
+  "runsigil_evidence",
+  "runsigil_control_api",
+  "runsigil_worker",
+  "runsigil_gateway",
+  "runsigil_cli",
+]
+exclude = ["alembic"]

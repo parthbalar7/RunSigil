@@ -1,0 +1,71 @@
+global:
+  imagePullSecrets: []
+  existingSecret: runsigil-runtime
+
+images:
+  controlApi:
+    repository: ghcr.io/runsigil/control-api
+    digest: ""
+  worker:
+    repository: ghcr.io/runsigil/worker
+    digest: ""
+  gateway:
+    repository: ghcr.io/runsigil/gateway
+    digest: ""
+  web:
+    repository: ghcr.io/runsigil/web
+    digest: ""
+  migrator:
+    repository: ghcr.io/runsigil/migrator
+    digest: ""
+
+components:
+  control-api:
+    replicas: 2
+    image: controlApi
+    port: 8000
+    command: ["runsigil-api"]
+    readinessPath: /ready
+  worker:
+    replicas: 2
+    image: worker
+    port: 8010
+    command: ["runsigil-worker"]
+    readinessPath: /ready
+  gateway:
+    replicas: 2
+    image: gateway
+    port: 8080
+    command: ["runsigil-gateway"]
+    readinessPath: /ready
+  web:
+    replicas: 2
+    image: web
+    port: 8080
+    command: []
+    readinessPath: /health
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+networkPolicy:
+  enabled: true
+  databaseCIDR: 10.0.0.0/8
+  providerCIDR: 203.0.113.0/24
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  enabled: false
+  className: ""
+  host: runsigil.example.com
+  tlsSecretName: runsigil-tls

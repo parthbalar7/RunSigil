@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["global", "images", "components", "resources", "networkPolicy"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "required": ["existingSecret"],
+      "properties": { "existingSecret": { "type": "string", "minLength": 1 } }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["repository", "digest"],
+        "properties": {
+          "repository": { "type": "string", "minLength": 1 },
+          "digest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": ["enabled", "databaseCIDR", "providerCIDR"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "databaseCIDR": { "type": "string", "minLength": 1 },
+        "providerCIDR": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
+

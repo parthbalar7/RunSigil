@@ -1,0 +1,448 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import secrets
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+from uuid import UUID, uuid4
+
+import httpx
+from runsigil_contracts import ActionExecutionRequest, ActionExecutionResult, canonical_digest
+from runsigil_control_api.models import (
+    Action,
+    ApprovalRequest,
+    AuditEvent,
+    Budget,
+    BudgetReservation,
+    EvidenceBundle,
+    Intent,
+    OutboxEvent,
+    PolicyDecisionRecord,
+    Run,
+    TraceEvent,
+)
+from runsigil_control_api.services.governed_actions import (
+    _audit,
+    _trace,
+    database_now,
+    decrypt_action_arguments,
+)
+from runsigil_evidence import EvidenceSigner
+from sqlalchemy import Engine, create_engine, or_, select
+from sqlalchemy.orm import Session
+
+from runsigil_worker.settings import WorkerSettings, get_worker_settings
+
+
+@dataclass(frozen=True)
+class ClaimedAction:
+    action_id: UUID
+    organization_id: UUID
+    run_id: UUID
+    content_digest: str
+    idempotency_key: str
+    claim_token: str
+    mode: str
+
+
+class ActionWorker:
+    def __init__(
+        self, settings: WorkerSettings | None = None, engine: Engine | None = None
+    ) -> None:
+        self.settings = settings or get_worker_settings()
+        self.engine = engine or create_engine(self.settings.worker_database_url, pool_pre_ping=True)
+        self.worker_name = f"runsigil-action-worker-{secrets.token_hex(6)}"
+
+    def claim_ready(self) -> ClaimedAction | None:
+        with Session(self.engine) as session, session.begin():
+            now = database_now(session)
+            event = session.scalar(
+                select(OutboxEvent)
+                .where(
+                    OutboxEvent.topic == "action.ready",
+                    OutboxEvent.dispatched_at.is_(None),
+                    OutboxEvent.available_at <= now,
+                )
+                .order_by(OutboxEvent.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if event is None:
+                return None
+            action = session.scalar(
+                select(Action).where(Action.id == event.aggregate_id).with_for_update()
+            )
+            if action is None or action.state != "approved":
+                event.dispatched_at = now
+                event.processed_at = now
+                event.attempts += 1
+                return None
+            claim_token = secrets.token_urlsafe(32)
+            action.state = "executing"
+            action.version += 1
+            action.worker_name = self.worker_name
+            action.claim_token_hash = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+            action.lease_expires_at = now + timedelta(seconds=self.settings.action_lease_seconds)
+            action.execute_attempts += 1
+            event.dispatched_at = now
+            event.attempts += 1
+            run = session.get(Run, action.run_id)
+            if run is not None:
+                run.status = "running"
+                run.active_node = "action-dispatch"
+                run.started_at = run.started_at or now
+            _trace(
+                session,
+                organization_id=action.organization_id,
+                run_id=action.run_id,
+                node_id="action-dispatch",
+                event_type="action.claimed",
+                status="running",
+                attributes={
+                    "action_id": str(action.id),
+                    "worker": self.worker_name,
+                    "content_digest": action.content_digest,
+                    "durable_claim_committed_before_effect": True,
+                },
+            )
+            return ClaimedAction(
+                action_id=action.id,
+                organization_id=action.organization_id,
+                run_id=action.run_id,
+                content_digest=action.content_digest,
+                idempotency_key=action.provider_idempotency_key,
+                claim_token=claim_token,
+                mode="execute",
+            )
+
+    def claim_reconciliation(self) -> ClaimedAction | None:
+        with Session(self.engine) as session, session.begin():
+            now = database_now(session)
+            action = session.scalar(
+                select(Action)
+                .where(
+                    or_(
+                        (Action.state == "executing") & (Action.lease_expires_at < now),
+                        (Action.state == "reconciliation_required")
+                        & (
+                            (Action.next_reconcile_at.is_(None)) | (Action.next_reconcile_at <= now)
+                        ),
+                    )
+                )
+                .order_by(Action.updated_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if action is None:
+                return None
+            claim_token = secrets.token_urlsafe(32)
+            action.state = "reconciling"
+            action.version += 1
+            action.worker_name = self.worker_name
+            action.claim_token_hash = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+            action.lease_expires_at = now + timedelta(seconds=self.settings.action_lease_seconds)
+            action.reconcile_attempts += 1
+            _trace(
+                session,
+                organization_id=action.organization_id,
+                run_id=action.run_id,
+                node_id="action-reconciliation",
+                event_type="action.reconciliation_claimed",
+                status="running",
+                attributes={"action_id": str(action.id), "attempt": action.reconcile_attempts},
+            )
+            return ClaimedAction(
+                action_id=action.id,
+                organization_id=action.organization_id,
+                run_id=action.run_id,
+                content_digest=action.content_digest,
+                idempotency_key=action.provider_idempotency_key,
+                claim_token=claim_token,
+                mode="reconcile",
+            )
+
+    def _arguments(self, action_id: UUID) -> dict[str, Any]:
+        with Session(self.engine) as session:
+            action = session.get(Action, action_id)
+            if action is None:
+                raise RuntimeError("claimed action disappeared")
+            return decrypt_action_arguments(action, self.settings)
+
+    async def dispatch(self, claim: ClaimedAction) -> ActionExecutionResult:
+        request = ActionExecutionRequest(
+            action_id=claim.action_id,
+            organization_id=claim.organization_id,
+            run_id=claim.run_id,
+            content_digest=claim.content_digest,
+            idempotency_key=claim.idempotency_key,
+            claim_token=claim.claim_token,
+            arguments=self._arguments(claim.action_id),
+        )
+        path = "/v1/actions/execute" if claim.mode == "execute" else "/v1/actions/reconcile"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+                response = await client.post(
+                    self.settings.gateway_url.rstrip("/") + path,
+                    headers={"X-RunSigil-Service-Token": self.settings.internal_service_token},
+                    json=request.model_dump(mode="json"),
+                )
+            if response.status_code >= 500:
+                return ActionExecutionResult(outcome="ambiguous", error_code="gateway_unavailable")
+            if response.status_code >= 400:
+                return ActionExecutionResult(outcome="failed", error_code="gateway_denied")
+            return ActionExecutionResult.model_validate(response.json())
+        except (httpx.TimeoutException, httpx.NetworkError, ValueError):
+            return ActionExecutionResult(outcome="ambiguous", error_code="gateway_outcome_unknown")
+
+    def settle(self, claim: ClaimedAction, result: ActionExecutionResult) -> None:
+        with Session(self.engine) as session, session.begin():
+            action = session.scalar(
+                select(Action).where(Action.id == claim.action_id).with_for_update()
+            )
+            if action is None:
+                return
+            expected_state = "executing" if claim.mode == "execute" else "reconciling"
+            expected_claim_hash = hashlib.sha256(claim.claim_token.encode("utf-8")).hexdigest()
+            if action.state != expected_state or action.claim_token_hash != expected_claim_hash:
+                return
+            now = database_now(session)
+            run = session.get(Run, action.run_id)
+            reservation = session.get(BudgetReservation, action.budget_reservation_id)
+            budget = (
+                session.scalar(
+                    select(Budget).where(Budget.id == reservation.budget_id).with_for_update()
+                )
+                if reservation is not None
+                else None
+            )
+            if result.outcome == "committed":
+                action.state = "committed"
+                action.receipt_preview_json = result.receipt_preview
+                action.provider_reference = result.provider_reference
+                action.error_code = None
+                action.lease_expires_at = None
+                if run is not None:
+                    run.status = "completed"
+                    run.active_node = None
+                    run.completed_at = now
+                if (
+                    reservation is not None
+                    and reservation.status == "active"
+                    and budget is not None
+                ):
+                    budget.reserved_minor -= reservation.amount_minor
+                    budget.spent_minor += reservation.amount_minor
+                    reservation.status = "committed"
+                    reservation.reconciled_at = now
+                status = "committed"
+            elif result.outcome == "failed":
+                action.state = "failed"
+                action.error_code = result.error_code or "provider_failed"
+                action.lease_expires_at = None
+                if run is not None:
+                    run.status = "failed"
+                    run.active_node = None
+                    run.error_code = action.error_code
+                    run.completed_at = now
+                if (
+                    reservation is not None
+                    and reservation.status == "active"
+                    and budget is not None
+                ):
+                    budget.reserved_minor -= reservation.amount_minor
+                    reservation.status = "released"
+                    reservation.reconciled_at = now
+                status = "failed"
+            else:
+                action.state = "reconciliation_required"
+                action.error_code = result.error_code or "provider_outcome_ambiguous"
+                action.next_reconcile_at = now + timedelta(seconds=5)
+                action.lease_expires_at = None
+                if run is not None:
+                    run.status = "reconciliation_required"
+                    run.active_node = "action-reconciliation"
+                    run.error_code = action.error_code
+                status = "ambiguous"
+            action.version += 1
+            outbox = session.scalar(
+                select(OutboxEvent)
+                .where(OutboxEvent.aggregate_id == action.id, OutboxEvent.topic == "action.ready")
+                .order_by(OutboxEvent.created_at.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if outbox is not None and result.outcome != "ambiguous":
+                outbox.processed_at = now
+            _trace(
+                session,
+                organization_id=action.organization_id,
+                run_id=action.run_id,
+                node_id="action-dispatch" if claim.mode == "execute" else "action-reconciliation",
+                event_type=f"action.{status}",
+                status=status,
+                attributes={
+                    "action_id": str(action.id),
+                    "content_digest": action.content_digest,
+                    "provider_reference": result.provider_reference,
+                    "raw_content_captured": False,
+                },
+            )
+            _audit(
+                session,
+                organization_id=action.organization_id,
+                actor_id=UUID("00000000-0000-4000-8000-000000000001"),
+                event_type=f"action.{status}",
+                subject_type="action",
+                subject_id=action.id,
+                content_digest=action.content_digest,
+                metadata={
+                    "run_id": str(action.run_id),
+                    "worker": self.worker_name,
+                    "outcome": result.outcome,
+                    "raw_content_captured": False,
+                },
+            )
+            if result.outcome in {"committed", "failed"}:
+                self._create_evidence(session, action)
+
+    def _create_evidence(self, session: Session, action: Action) -> None:
+        if (
+            session.scalar(select(EvidenceBundle).where(EvidenceBundle.run_id == action.run_id))
+            is not None
+        ):
+            return
+        run = session.get(Run, action.run_id)
+        intent = session.get(Intent, action.intent_id)
+        decision = session.get(PolicyDecisionRecord, action.policy_decision_id)
+        approval = (
+            session.get(ApprovalRequest, action.approval_request_id)
+            if action.approval_request_id
+            else None
+        )
+        reservation = session.get(BudgetReservation, action.budget_reservation_id)
+        traces = list(
+            session.scalars(
+                select(TraceEvent)
+                .where(TraceEvent.run_id == action.run_id)
+                .order_by(TraceEvent.sequence)
+            )
+        )
+        audits = list(
+            session.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.organization_id == action.organization_id)
+                .order_by(AuditEvent.sequence)
+            )
+        )
+        if run is None or intent is None or decision is None or reservation is None:
+            raise RuntimeError("cannot seal incomplete action lineage")
+        manifest = {
+            "schema": "runsigil.evidence/v1",
+            "organization_id": str(action.organization_id),
+            "run": {
+                "id": str(run.id),
+                "status": run.status,
+                "input_digest": run.input_digest,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+            },
+            "intent": {
+                "id": str(intent.id),
+                "action_type": intent.action_type,
+                "arguments_digest": intent.arguments_digest,
+                "content_digest": intent.content_digest,
+                "delegation_id": str(intent.delegation_id),
+            },
+            "action": {
+                "id": str(action.id),
+                "state": action.state,
+                "content_digest": action.content_digest,
+                "provider_idempotency_key": action.provider_idempotency_key,
+                "provider_reference": action.provider_reference,
+                "execute_attempts": action.execute_attempts,
+                "reconcile_attempts": action.reconcile_attempts,
+            },
+            "policy": {
+                "decision_id": str(decision.id),
+                "effect": decision.effect,
+                "reason_code": decision.reason_code,
+                "policy_digest": decision.policy_digest,
+            },
+            "approval": (
+                {
+                    "id": str(approval.id),
+                    "status": approval.status,
+                    "content_digest": approval.content_digest,
+                    "decided_at": approval.decided_at,
+                    "decided_by": str(approval.decided_by) if approval.decided_by else None,
+                }
+                if approval is not None
+                else None
+            ),
+            "budget": {
+                "reservation_id": str(reservation.id),
+                "amount_minor": reservation.amount_minor,
+                "currency": reservation.currency,
+                "status": reservation.status,
+            },
+            "trace": [
+                {
+                    "id": str(event.id),
+                    "sequence": event.sequence,
+                    "node_id": event.node_id,
+                    "event_type": event.event_type,
+                    "status": event.status,
+                    "attributes_digest": canonical_digest(event.attributes_json),
+                }
+                for event in traces
+            ],
+            "audit_segment": [
+                {
+                    "sequence": event.sequence,
+                    "event_type": event.event_type,
+                    "subject_id": str(event.subject_id),
+                    "previous_hash": event.previous_hash,
+                    "row_hash": event.row_hash,
+                }
+                for event in audits
+            ],
+            "privacy": {"raw_content_captured": False, "secret_values_included": False},
+        }
+        signer = EvidenceSigner(
+            self.settings.evidence_ed25519_private_key_b64,
+            self.settings.evidence_signing_key_id,
+        )
+        envelope = signer.sign(manifest)
+        session.add(
+            EvidenceBundle(
+                id=uuid4(),
+                organization_id=action.organization_id,
+                run_id=action.run_id,
+                content_digest=envelope.content_digest,
+                manifest_json=envelope.manifest,
+                signature_algorithm=envelope.signature_algorithm,
+                signing_key_id=envelope.signing_key_id,
+                public_key_b64=envelope.public_key_b64,
+                signature_b64=envelope.signature_b64,
+                export_status="local_only",
+            )
+        )
+
+    async def process_once(self) -> bool:
+        claim = self.claim_ready() or self.claim_reconciliation()
+        if claim is None:
+            return False
+        result = await self.dispatch(claim)
+        self.settle(claim, result)
+        return True
+
+    async def run_forever(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            processed = await self.process_once()
+            if not processed:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass

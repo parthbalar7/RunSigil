@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.7
+FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+WORKDIR /build
+COPY requirements-build.lock requirements.lock pyproject.toml README.md LICENSE ./
+RUN python -m venv /opt/runsigil && \
+    /opt/runsigil/bin/pip install --require-hashes -r requirements-build.lock && \
+    /opt/runsigil/bin/pip install --require-hashes -r requirements.lock
+COPY apps ./apps
+COPY packages ./packages
+RUN /opt/runsigil/bin/pip install --no-build-isolation --no-deps .
+
+FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS runtime
+ENV PATH=/opt/runsigil/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp/runsigil
+RUN groupadd --gid 65532 runsigil && useradd --uid 65532 --gid 65532 --no-create-home --home-dir /tmp/runsigil runsigil
+WORKDIR /app
+COPY --from=builder /opt/runsigil /opt/runsigil
+COPY apps/control-api/alembic.ini /app/apps/control-api/alembic.ini
+COPY apps/control-api/alembic /app/apps/control-api/alembic
+COPY examples/demo-provider /app/examples/demo-provider
+USER 65532:65532
+EXPOSE 8000 8010 8080 8090
+CMD ["runsigil-api"]

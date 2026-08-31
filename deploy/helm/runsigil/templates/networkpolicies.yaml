@@ -1,0 +1,69 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runsigil-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: runsigil
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runsigil-control-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: runsigil
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.databaseCIDR }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: runsigil
+              app.kubernetes.io/instance: {{ .Release.Name }}
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.providerCIDR }}
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runsigil-service-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: runsigil
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: runsigil
+              app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
