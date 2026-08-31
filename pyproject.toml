@@ -34,7 +34,7 @@ dev = [
   "pytest-cov==6.0.0",
   "pytest-asyncio==0.25.3",
   "openai-agents==0.22.0",
-  "ruff==0.9.2",
+  "ruff==0.16.5",
 ]
 langgraph-adapter = ["langgraph==1.2.11"]
 openai-agents-adapter = ["openai-agents==0.22.0"]
