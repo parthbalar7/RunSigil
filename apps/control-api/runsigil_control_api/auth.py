@@ -137,3 +137,25 @@ def internal_action_session(
         except Exception:
             session.rollback()
             raise
+
+
+@contextmanager
+def internal_model_call_session(
+    model_call_id: UUID,
+    service_token: str | None,
+) -> Generator[Session, None, None]:
+    settings = get_settings()
+    verify_internal_token(service_token, expected=settings.gateway_service_token, code="gateway")
+    with GatewayAuthorizationSessionLocal() as session:
+        try:
+            organization_id = session.scalar(
+                text("SELECT organization_id FROM model_calls WHERE id = :model_call_id"),
+                {"model_call_id": model_call_id},
+            )
+            if organization_id is None:
+                raise RunSigilError(ErrorCode.NOT_FOUND, "Model call not found.", status_code=404)
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise

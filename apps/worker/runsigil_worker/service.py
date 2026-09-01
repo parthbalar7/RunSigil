@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -21,6 +22,7 @@ from runsigil_control_api.models import (
     PolicyDecisionRecord,
     Run,
     TraceEvent,
+    WorkflowToolCall,
 )
 from runsigil_control_api.services.budgets import (
     action_reservations,
@@ -32,11 +34,20 @@ from runsigil_control_api.services.governed_actions import (
     database_now,
     decrypt_action_arguments,
 )
+from runsigil_control_api.services.workflow_engine import WorkflowEngineWorker
+from runsigil_control_api.services.workflow_tools import (
+    lock_tool_timeout_event,
+    settle_workflow_tool_call,
+    tool_call_id_for_action,
+)
 from runsigil_evidence import EvidenceSigner
 from sqlalchemy import Engine, create_engine, or_, select
 from sqlalchemy.orm import Session
 
+from runsigil_worker.model_calls import ModelCallWorker
 from runsigil_worker.settings import WorkerSettings, get_worker_settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -57,12 +68,22 @@ class ActionWorker:
         self.settings = settings or get_worker_settings()
         self.engine = engine or create_engine(self.settings.worker_database_url, pool_pre_ping=True)
         self.worker_name = f"runsigil-action-worker-{secrets.token_hex(6)}"
+        self.workflow_worker = WorkflowEngineWorker(
+            self.engine,
+            self.settings,
+            self.worker_name,
+        )
+        self.model_call_worker = ModelCallWorker(
+            settings=self.settings,
+            engine=self.engine,
+            worker_name=self.worker_name,
+        )
 
     def claim_ready(self) -> ClaimedAction | None:
         with Session(self.engine) as session, session.begin():
             now = database_now(session)
-            event = session.scalar(
-                select(OutboxEvent)
+            event_id = session.scalar(
+                select(OutboxEvent.id)
                 .where(
                     OutboxEvent.topic == "action.ready",
                     OutboxEvent.dispatched_at.is_(None),
@@ -70,10 +91,38 @@ class ActionWorker:
                 )
                 .order_by(OutboxEvent.created_at)
                 .limit(1)
+            )
+            if event_id is None:
+                return None
+            action_id = session.scalar(
+                select(OutboxEvent.aggregate_id).where(OutboxEvent.id == event_id)
+            )
+            if action_id is None:
+                return None
+            tool_call_id = tool_call_id_for_action(session, action_id)
+            if tool_call_id is not None:
+                lock_tool_timeout_event(session, tool_call_id)
+            event = session.scalar(
+                select(OutboxEvent)
+                .where(
+                    OutboxEvent.id == event_id,
+                    OutboxEvent.topic == "action.ready",
+                    OutboxEvent.dispatched_at.is_(None),
+                    OutboxEvent.available_at <= now,
+                )
                 .with_for_update(skip_locked=True)
             )
             if event is None:
                 return None
+            tool_call = (
+                session.scalar(
+                    select(WorkflowToolCall)
+                    .where(WorkflowToolCall.id == tool_call_id)
+                    .with_for_update()
+                )
+                if tool_call_id is not None
+                else None
+            )
             action = session.scalar(
                 select(Action).where(Action.id == event.aggregate_id).with_for_update()
             )
@@ -89,6 +138,8 @@ class ActionWorker:
             action.claim_token_hash = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
             action.lease_expires_at = now + timedelta(seconds=self.settings.action_lease_seconds)
             action.execute_attempts += 1
+            if tool_call is not None:
+                tool_call.status = "executing"
             event.dispatched_at = now
             event.attempts += 1
             run = session.get(Run, action.run_id)
@@ -123,8 +174,8 @@ class ActionWorker:
     def claim_reconciliation(self) -> ClaimedAction | None:
         with Session(self.engine) as session, session.begin():
             now = database_now(session)
-            action = session.scalar(
-                select(Action)
+            action_id = session.scalar(
+                select(Action.id)
                 .where(
                     or_(
                         (Action.state == "executing") & (Action.lease_expires_at < now),
@@ -136,6 +187,33 @@ class ActionWorker:
                 )
                 .order_by(Action.updated_at)
                 .limit(1)
+            )
+            if action_id is None:
+                return None
+            tool_call_id = tool_call_id_for_action(session, action_id)
+            if tool_call_id is not None:
+                lock_tool_timeout_event(session, tool_call_id)
+            tool_call = (
+                session.scalar(
+                    select(WorkflowToolCall)
+                    .where(WorkflowToolCall.id == tool_call_id)
+                    .with_for_update()
+                )
+                if tool_call_id is not None
+                else None
+            )
+            action = session.scalar(
+                select(Action)
+                .where(
+                    Action.id == action_id,
+                    or_(
+                        (Action.state == "executing") & (Action.lease_expires_at < now),
+                        (Action.state == "reconciliation_required")
+                        & (
+                            (Action.next_reconcile_at.is_(None)) | (Action.next_reconcile_at <= now)
+                        ),
+                    ),
+                )
                 .with_for_update(skip_locked=True)
             )
             if action is None:
@@ -148,6 +226,8 @@ class ActionWorker:
             action.lease_expires_at = now + timedelta(seconds=self.settings.action_lease_seconds)
             action.reconcile_attempts += 1
             action.reconcile_cycle_attempts += 1
+            if tool_call is not None:
+                tool_call.status = "reconciling"
             _trace(
                 session,
                 organization_id=action.organization_id,
@@ -206,6 +286,19 @@ class ActionWorker:
 
     def settle(self, claim: ClaimedAction, result: ActionExecutionResult) -> None:
         with Session(self.engine) as session, session.begin():
+            tool_call_id = tool_call_id_for_action(session, claim.action_id)
+            timeout_event = (
+                lock_tool_timeout_event(session, tool_call_id) if tool_call_id is not None else None
+            )
+            tool_call = (
+                session.scalar(
+                    select(WorkflowToolCall)
+                    .where(WorkflowToolCall.id == tool_call_id)
+                    .with_for_update()
+                )
+                if tool_call_id is not None
+                else None
+            )
             action = session.scalar(
                 select(Action).where(Action.id == claim.action_id).with_for_update()
             )
@@ -319,6 +412,19 @@ class ActionWorker:
                     dead_letter.resolved_at = now
                     dead_letter.version += 1
                 self._create_evidence(session, action)
+            if tool_call is not None:
+                settle_workflow_tool_call(
+                    session,
+                    call=tool_call,
+                    action=action,
+                    now=now,
+                )
+                if (
+                    timeout_event is not None
+                    and timeout_event.processed_at is None
+                    and tool_call.status in {"completed", "failed"}
+                ):
+                    timeout_event.processed_at = now
 
     def _dead_letter(
         self,
@@ -515,15 +621,26 @@ class ActionWorker:
 
     async def process_once(self) -> bool:
         claim = self.claim_ready() or self.claim_reconciliation()
-        if claim is None:
-            return False
-        result = await self.dispatch(claim)
-        self.settle(claim, result)
-        return True
+        if claim is not None:
+            result = await self.dispatch(claim)
+            self.settle(claim, result)
+            return True
+        model_claim = (
+            self.model_call_worker.claim_ready() or self.model_call_worker.claim_reconciliation()
+        )
+        if model_claim is not None:
+            model_result = await self.model_call_worker.dispatch(model_claim)
+            self.model_call_worker.settle(model_claim, model_result)
+            return True
+        return self.workflow_worker.process_once()
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
-            processed = await self.process_once()
+            try:
+                processed = await self.process_once()
+            except Exception:
+                logger.exception("RunSigil worker iteration failed; durable work will be retried")
+                processed = False
             if not processed:
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=1.0)

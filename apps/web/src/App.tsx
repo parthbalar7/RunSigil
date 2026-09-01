@@ -37,7 +37,7 @@ function Login({ onConnect }: { onConnect: (config: ApiConfig, context: Workspac
           <div><strong>RunSigil</strong><span>Govern every agent run.</span></div>
         </div>
         <div className="login-copy">
-          <p className="eyebrow">Milestone 1 operator access</p>
+          <p className="eyebrow">RunSigil operator access</p>
           <h1 id="login-title">Open the governed action console</h1>
           <p>Connect to your local control plane. The API key stays in this browser tab only.</p>
         </div>
@@ -146,10 +146,12 @@ function Console({ config, context, onDisconnect }: { config: ApiConfig; context
         <nav aria-label="Primary navigation">
           <a className="nav-item active" href="#overview" aria-current="page">Overview</a>
           <a className="nav-item" href="#runs">Runs</a>
+          <a className="nav-item" href="#workflows">Workflows</a>
+          <a className="nav-item" href="#evaluations">Evaluations</a>
           <a className="nav-item" href="#approvals">Approvals</a>
           <a className="nav-item" href="#evidence">Evidence</a>
         </nav>
-        <div className="milestone-note"><span>Milestone 1</span><p>One complete governed-action slice. Later product areas are intentionally absent.</p></div>
+        <div className="milestone-note"><span>Milestone 3 foundation</span><p>Durable deterministic workflows, checkpoints, forks, and evaluation release gates.</p></div>
       </aside>
       <div className="main-area">
         <header className="topbar">
@@ -163,12 +165,12 @@ function Console({ config, context, onDisconnect }: { config: ApiConfig; context
             <>
               {pendingRun && <button type="button" className="new-events" onClick={() => { setRun(pendingRun); setPendingRun(null); setSelectedEvent(null); }}>New events available — update view</button>}
               <div className="metric-strip" aria-label="Run summary">
-                <div><span>Run</span><code>{run.id.slice(0, 12)}</code></div><div><span>Active node</span><strong>{run.active_node ?? "Complete"}</strong></div><div><span>Attempts</span><strong>{run.action?.execute_attempts ?? 0}</strong></div><div><span>Evidence</span><strong>{run.evidence_status}</strong></div>
+                <div><span>Run</span><code>{run.id.slice(0, 12)}</code></div><div><span>Active node</span><strong>{run.active_node ?? "Complete"}</strong></div><div><span>Attempts</span><strong>{run.workflow?.step_count ?? run.action?.execute_attempts ?? 0}</strong></div><div><span>Evidence</span><strong>{run.evidence_status}</strong></div>
               </div>
               <RunPath run={run} selectedNode={selectedNode} onSelect={(node) => { setSelectedNode(node); setSelectedEvent(null); }} />
               <div className="investigation-grid">
                 <Timeline events={filteredEvents} selectedEvent={selectedEvent} onSelect={selectEvent} />
-                {run.approval ? <ApprovalPanel approval={run.approval} busy={busy} onDecision={decide} /> : <aside className="panel detail-panel"><p className="eyebrow">Action detail</p><h2>{run.action?.tool_name}</h2><dl className="fact-list"><div><dt>State</dt><dd>{run.action?.state}</dd></div><div><dt>Content digest</dt><dd><code>{run.action?.content_digest}</code></dd></div><div><dt>Evidence</dt><dd>{run.evidence_status}</dd></div></dl></aside>}
+                {run.approval ? <ApprovalPanel approval={run.approval} busy={busy} onDecision={decide} /> : <aside className="panel detail-panel"><p className="eyebrow">{run.workflow ? "Workflow detail" : "Action detail"}</p><h2>{run.workflow ? "Durable execution" : run.action?.tool_name}</h2><dl className="fact-list"><div><dt>State</dt><dd>{run.workflow?.status ?? run.action?.state}</dd></div><div><dt>Content digest</dt><dd><code>{run.workflow?.content_digest ?? run.action?.content_digest}</code></dd></div><div><dt>Evidence</dt><dd>{run.evidence_status}</dd></div></dl></aside>}
               </div>
             </>
           )}
@@ -184,4 +186,3 @@ export default function App() {
   function disconnect() { sessionStorage.removeItem("runsigil.apiKey"); setConfig(null); setContext(null); }
   return config && context ? <Console config={config} context={context} onDisconnect={disconnect} /> : <Login onConnect={(nextConfig, nextContext) => { setConfig(nextConfig); setContext(nextContext); }} />;
 }
-

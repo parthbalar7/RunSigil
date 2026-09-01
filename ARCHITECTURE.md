@@ -14,11 +14,13 @@
 | OpenTelemetry | Implemented | Privacy-safe GenAI agent/tool spans and duration metrics over OTLP; semantic conventions remain development-stability upstream |
 | Dead-letter queue | Implemented | Durable inspection and version-fenced bounded reconcile-only redrive for unresolved effects |
 | Framework adapters | Implemented | LangGraph `1.2.11` and OpenAI Agents `0.22.0`; adapters govern actions but do not host arbitrary agents |
-| Gateway | Stateless protocol ingress plus fixed-route guarded egress | General connectors are not implemented |
-| Worker | Durable action executor/reconciler | Not a general agent process executor |
+| Gateway | Stateless protocol ingress plus fixed-route guarded tool/model egress | General connectors and arbitrary model providers are not implemented |
+| Worker | Durable action and serial workflow-model executor/reconciler | Not a general agent process host |
 | Web UI | Governed run and approval operator flow | Broader product surfaces are intentionally absent |
 | Kubernetes and cloud | Development manifests only | Milestone 5 |
 | Milestone 2 reference slice | Implemented | MCP/A2A ingress, telemetry, hierarchical budgets, DLQ, and two framework adapters |
+| Workflow Engine v2 | Milestone 3 phases 6-7 implemented | Earlier deterministic graph features plus explicit tool simulation and serial governed agent-model nodes |
+| Evaluation | Milestone 3 phase 6 implemented | Encrypted datasets and five graders plus explicit deterministic simulation for the supported effectful tool |
 
 ## System shape
 
@@ -59,6 +61,12 @@ transactional outbox (PostgreSQL, polled in this slice)
                     example external provider
 
 API / worker / gateway / adapters --OTLP--> OpenTelemetry collector
+
+Workflow API --version/deploy--> workflow outbox --> workflow worker
+     |                                      |
+     +-- encrypted state/checkpoints <------+-- deterministic node attempt
+     |
+     +-- dataset evaluation --> release gate --> signed workflow evidence
 ```
 
 The API creates a `Run`, exact `Intent`, canonical action digest, `PolicyDecision`,
@@ -92,6 +100,76 @@ actor. Neither adapter records raw prompts or model outputs. OTLP spans use GenA
 `invoke_agent` and `execute_tool` operation names plus RunSigil correlation IDs; raw
 arguments, prompts, and outputs are absent from span attributes by default.
 
+Workflow versions are immutable and deployment is stricter than draft validation.
+The worker processes one deterministic node per committed outbox step and
+appends an encrypted checkpoint. Parallel branches use stable node-ID scheduling and
+join only after every predecessor has completed. Cycles are rejected unless they
+pass through a bounded loop with mandatory iteration, duration, token, and cost
+limits. Expired claims may be recovered, while a stale claim token cannot settle a
+step. Checkpoint forks create a new Run with explicit parent lineage.
+
+Phase 2 wait nodes persist their exact request lineage and a scheduled wake outbox
+record before suspension. Timers resume at their due time. Approval, information,
+and event responses must match the exact wait digest, are consumed once, and race
+timeouts under database locks. Information and event payloads are encrypted and
+bound to the wait before a fresh outbox record resumes the worker. The current
+scheduler supports wait nodes only in serial workflows; deployment rejects a graph
+that combines a wait with parallel fan-out.
+
+Referenced subworkflows are serial durable calls to an active deployment in the
+same project, environment, and agent scope. Deployment recursively verifies the
+referenced definition digest, rejects cycles, and caps nesting at eight levels. At
+runtime the worker atomically creates a child Run/execution and an immutable call
+record before suspending the parent. Child settlement publishes an exact call-bound
+resume; only a completed child state whose encrypted content and digests verify is
+inserted under the declared parent state key. Timeouts and child failures fail the
+parent closed. An authenticated cancellation is allowed only while a deterministic
+workflow is queued or waiting. Pending waits/calls become terminal, children are
+woken to observe cancellation, and the worker signs the final metadata-only evidence.
+
+Phase 5 tool nodes reference the supported catalog tool plus encrypted-state input
+and result keys. At the node boundary, the workflow worker creates a separate child
+governed-action Run in the same transaction as an immutable `WorkflowToolCall` and
+scheduled timeout. That child follows the existing delegation, action policy,
+multi-scope budget, exact approval, action outbox, gateway authorization,
+audience-bound credential, reconciliation, and DLQ path. The parent resumes only
+after terminal child settlement and verifies the action, intent, result, and child
+evidence digests before storing the safe result projection. A timeout may cancel
+only a pending approval or an unclaimed action; once dispatch is possible, the
+parent waits for reconciliation. Effectful graphs require an explicit immutable
+simulation profile for checkpoint fork, replay, and evaluation. The deterministic
+simulator validates the tool and argument contracts, stores argument/tool/profile/
+result digests in an append-only call, and returns a receipt stating no side effect
+occurred. Live starts still use the governed child Run. Parallel and nested-
+subworkflow tool execution remain rejected.
+
+Phase 7 serial `agent` nodes reference an active model route and fail-closed policy.
+Before egress, the worker persists the exact request/route digests, policy decision,
+delegation, multi-scope budget reservations, idempotency key, encrypted request,
+model-call row, and outbox records. It commits a leased claim before the gateway's
+final online authorization. The fixed demo route receives a model-call-bound
+audience credential; completed output is encrypted at rest and only its digest and
+usage metadata are exposed. Uncertain outcomes reconcile by idempotency key rather
+than blind execution. Agent nodes are serial and cannot yet share a graph with tool
+nodes or run in referenced children.
+
+Nodes may reference an active policy bundle in the workflow project. Before any
+node behavior, the worker evaluates the typed `workflow.node.execute` context and
+persists an append-only decision binding node, execution sequence, input digest,
+policy digest, expiry, effect, and reason. Only `allow` advances; every other effect
+and missing, stale, invalid, or unavailable policy fails closed. Checkpoint replay
+creates a new execution with immutable source lineage and settles `matched` only
+when both final state and full trajectory digests equal the completed source.
+
+Evaluation datasets store encrypted scenario input, expected output, and assertions.
+Results contain only task, trajectory, environment/version, policy, safety scores,
+and digests. Policy assertions require persisted `allow` decisions at named nodes;
+safety assertions reject forbidden path nodes, excess steps, and failed execution. A release
+gate can compare against a completed baseline for the same dataset version.
+Authenticated reviewers may add idempotent, append-only labels, scores, and safe
+reason codes. These later annotations are audited but do not rewrite the already
+sealed per-run evidence. This is not the full unified evaluation system.
+
 ## Data and tenancy
 
 PostgreSQL is authoritative. Redis may wake workers but cannot create or authorize
@@ -116,6 +194,9 @@ runtime credential.
   digest, reject expiry, and atomically consume the approval once.
 - Raw action arguments are stored only in the action row for execution. API output,
   traces, audit, and evidence expose a redacted preview and the content digest.
+- Workflow runtime state, checkpoints, and evaluation scenario payloads are
+  encrypted with content-bound associated data. Raw values are absent from API
+  responses, traces, audits, evaluation results, and evidence.
 - Evidence signs a domain-separated digest of canonical JSON with Ed25519. The
   public key and key ID travel with the bundle for offline integrity verification;
   production trust-root pinning remains required.
@@ -141,6 +222,25 @@ runtime credential.
 | MCP header/body version, method, or tool mismatch | Request rejected before dispatch |
 | Untrusted browser Origin or unsupported A2A Part | Request rejected before Run creation |
 | Cancellation after dispatch could race an effect | Cancellation denied; later fenced cancellation required |
+| Workflow contains an unsupported node or unbounded cycle | Deployment rejected with node/edge validation issues |
+| Workflow worker crashes after claim | Lease expires; a new token reclaims the step and the stale token cannot settle it |
+| Workflow exceeds step or deadline bound | Run fails closed and seals failure evidence |
+| Checkpoint state or definition is modified | Digest and associated-data verification fail closed |
+| Evaluation misses quality or regression threshold | Evaluation completes with a failed release gate |
+| Wait response digest, type, event key, or state lineage differs | Response rejected; workflow stays suspended |
+| Wait response is replayed or races its timeout | One locked terminal transition wins; the other fails closed |
+| Workflow wait expires | Run fails closed and seals failure evidence |
+| Referenced deployment is stale, cross-scope, cyclic, or too deeply nested | Parent deployment is rejected |
+| Subworkflow result lineage/digest differs or the call expires | Parent fails closed and seals evidence |
+| Node policy is missing, invalid, stale, unavailable, or non-allow | Node does not execute; run fails closed |
+| Replay final state or trajectory differs from the source | Replay settles `diverged`; evidence preserves both digests |
+| Queued/waiting workflow is cancelled | Pending waits/calls cancel atomically; worker seals signed evidence |
+| Workflow tool approval expires before dispatch | Child action and reservations cancel; parent fails with signed pre-effect timeout evidence |
+| Workflow tool outcome is ambiguous | Parent remains suspended; receipt reconciliation and bounded DLQ/redrive own the outcome |
+| Effectful fork/replay/evaluation omits or mismatches its simulation profile | Request fails closed before a new execution is created |
+| Model policy, route, delegation, budget, claim, or request digest is stale | Gateway denies model-provider egress |
+| Model provider outcome is ambiguous | Durable model call reconciles by idempotency key; execution is never blindly repeated |
+| Cancellation follows model-call queueing | Cancellation is denied so external-call ownership cannot be orphaned |
 
 ## Trust boundaries and non-claims
 
@@ -152,3 +252,8 @@ external effects, arbitrary agent isolation, kernel sensing, external timestampi
 MCP server sessions/streams, A2A streaming/push, or production readiness.
 OpenTelemetry GenAI semantic conventions are emitted at their current upstream
 development stability and may require future compatibility updates.
+Supervisor and handoff nodes remain non-executable. Agent nodes support one serial,
+fixed demo model route; they do not host arbitrary agent processes. Tool nodes and
+simulation are limited to the fixed governed transactional demo-provider contract.
+Wait, subworkflow, tool, and model suspension is serial-only, agent/tool mixing is
+rejected, and the web surface is an investigation view rather than an editor.

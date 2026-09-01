@@ -6,10 +6,24 @@ from runsigil_contracts.models import (
     ActionExecutionRequest,
     ActionExecutionResult,
     DecisionEffect,
+    ModelExecutionRequest,
+    ModelExecutionResult,
     PolicyContext,
     PolicyDecision,
 )
 from runsigil_contracts.protocols import ContentBoundDecisionArguments, GovernedActionArguments
+from runsigil_contracts.workflows import (
+    EXECUTABLE_NODE_TYPES,
+    WAIT_NODE_TYPES,
+    WorkflowDefinition,
+    WorkflowEdge,
+    WorkflowLimits,
+    WorkflowNode,
+    WorkflowNodeType,
+    WorkflowValidationIssue,
+    WorkflowValidationResult,
+    validate_workflow_definition,
+)
 
 __all__ = [
     "ActionExecutionRequest",
@@ -18,10 +32,22 @@ __all__ = [
     "DecisionEffect",
     "ErrorCode",
     "GovernedActionArguments",
+    "ModelExecutionRequest",
+    "ModelExecutionResult",
     "PolicyContext",
     "PolicyDecision",
     "RunSigilError",
+    "EXECUTABLE_NODE_TYPES",
+    "WAIT_NODE_TYPES",
+    "WorkflowDefinition",
+    "WorkflowEdge",
+    "WorkflowLimits",
+    "WorkflowNode",
+    "WorkflowNodeType",
+    "WorkflowValidationIssue",
+    "WorkflowValidationResult",
     "canonical_bytes",
     "canonical_digest",
     "canonical_json_value",
+    "validate_workflow_definition",
 ]

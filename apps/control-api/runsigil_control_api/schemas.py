@@ -7,6 +7,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from runsigil_contracts import ContentBoundDecisionArguments, GovernedActionArguments
 
+from runsigil_control_api.workflow_schemas import WorkflowExecutionSummary
+
 
 class ErrorBody(BaseModel):
     code: str
@@ -80,8 +82,10 @@ class RunDetail(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_code: str | None
+    run_kind: str
     action: ActionSummary | None
     approval: ApprovalSummary | None
+    workflow: WorkflowExecutionSummary | None
     trace_events: list[TraceEventSummary]
     evidence_status: str
 

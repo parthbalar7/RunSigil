@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from runsigil_control_api.auth import AuthContext
-from runsigil_control_api.models import Action, DeadLetter, Run
+from runsigil_control_api.models import Action, DeadLetter, Run, WorkflowToolCall
 from runsigil_control_api.services.governed_actions import _audit, _trace, database_now
 
 
@@ -20,6 +20,31 @@ def redrive_dead_letter(
     expected_version: int,
     reason: str,
 ) -> DeadLetter:
+    dead_letter_candidate = session.scalar(
+        select(DeadLetter).where(DeadLetter.id == dead_letter_id)
+    )
+    if dead_letter_candidate is None:
+        raise RunSigilError(ErrorCode.NOT_FOUND, "Dead letter not found.", status_code=404)
+
+    tool_call_id = session.scalar(
+        select(WorkflowToolCall.id).where(
+            WorkflowToolCall.action_id == dead_letter_candidate.action_id
+        )
+    )
+    tool_call: WorkflowToolCall | None = None
+    if tool_call_id is not None:
+        from runsigil_control_api.services.workflow_tools import lock_tool_timeout_event
+
+        lock_tool_timeout_event(session, tool_call_id)
+        tool_call = session.scalar(
+            select(WorkflowToolCall).where(WorkflowToolCall.id == tool_call_id).with_for_update()
+        )
+    action = session.scalar(
+        select(Action).where(Action.id == dead_letter_candidate.action_id).with_for_update()
+    )
+    run = session.scalar(
+        select(Run).where(Run.id == dead_letter_candidate.run_id).with_for_update()
+    )
     dead_letter = session.scalar(
         select(DeadLetter).where(DeadLetter.id == dead_letter_id).with_for_update()
     )
@@ -44,11 +69,6 @@ def redrive_dead_letter(
             "The bounded dead-letter redrive limit is exhausted.",
             status_code=409,
         )
-
-    action = session.scalar(
-        select(Action).where(Action.id == dead_letter.action_id).with_for_update()
-    )
-    run = session.scalar(select(Run).where(Run.id == dead_letter.run_id).with_for_update())
     if (
         action is None
         or run is None
@@ -76,6 +96,14 @@ def redrive_dead_letter(
     run.status = "reconciliation_required"
     run.active_node = "action-reconciliation"
     run.error_code = action.error_code
+    if tool_call is not None:
+        if tool_call.status != "dead_lettered":
+            raise RunSigilError(
+                ErrorCode.INVALID_TRANSITION,
+                "Workflow tool-call dead-letter lineage is stale.",
+                status_code=409,
+            )
+        tool_call.status = "reconciliation_required"
 
     _trace(
         session,

@@ -15,6 +15,7 @@ from runsigil_control_api.models import (
     Budget,
     BudgetReservation,
     BudgetScope,
+    ModelCallBudgetReservation,
 )
 
 SUPPORTED_RESOURCES = frozenset(
@@ -175,6 +176,23 @@ def link_action_reservations(
         )
 
 
+def link_model_call_reservations(
+    session: Session,
+    *,
+    organization_id: UUID,
+    model_call_id: UUID,
+    reservations: list[BudgetReservation],
+) -> None:
+    for reservation in reservations:
+        session.add(
+            ModelCallBudgetReservation(
+                organization_id=organization_id,
+                model_call_id=model_call_id,
+                budget_reservation_id=reservation.id,
+            )
+        )
+
+
 def action_reservations(
     session: Session,
     *,
@@ -194,6 +212,33 @@ def action_reservations(
         .where(
             ActionBudgetReservation.organization_id == organization_id,
             ActionBudgetReservation.action_id == action_id,
+        )
+        .order_by(BudgetReservation.id)
+    )
+    if lock:
+        statement = statement.with_for_update(of=BudgetReservation)
+    return list(session.scalars(statement))
+
+
+def model_call_reservations(
+    session: Session,
+    *,
+    organization_id: UUID,
+    model_call_id: UUID,
+    lock: bool = False,
+) -> list[BudgetReservation]:
+    statement = (
+        select(BudgetReservation)
+        .join(
+            ModelCallBudgetReservation,
+            and_(
+                ModelCallBudgetReservation.organization_id == BudgetReservation.organization_id,
+                ModelCallBudgetReservation.budget_reservation_id == BudgetReservation.id,
+            ),
+        )
+        .where(
+            ModelCallBudgetReservation.organization_id == organization_id,
+            ModelCallBudgetReservation.model_call_id == model_call_id,
         )
         .order_by(BudgetReservation.id)
     )
@@ -285,6 +330,62 @@ def settle_action_reservations(
             raise RunSigilError(
                 ErrorCode.INVALID_TRANSITION,
                 "Actual budget usage cannot be negative.",
+                status_code=409,
+            )
+        reservation.actual_value = actual
+        reservation.reconciled_at = now
+        if committed and reservation.resource_key not in RELEASABLE_RESOURCES:
+            budget.spent_value += actual
+            reservation.status = "committed"
+        else:
+            reservation.status = "released"
+    return reservations
+
+
+def settle_model_call_reservations(
+    session: Session,
+    *,
+    organization_id: UUID,
+    model_call_id: UUID,
+    now: datetime,
+    committed: bool,
+    actual_usage: Mapping[str, int] | None = None,
+) -> list[BudgetReservation]:
+    reservations = model_call_reservations(
+        session,
+        organization_id=organization_id,
+        model_call_id=model_call_id,
+        lock=True,
+    )
+    budgets = {
+        budget.id: budget
+        for budget in session.scalars(
+            select(Budget)
+            .where(Budget.id.in_([row.budget_id for row in reservations]))
+            .order_by(Budget.id)
+            .with_for_update()
+        )
+    }
+    usage = dict(actual_usage or {})
+    for reservation in reservations:
+        if reservation.status != "active":
+            continue
+        budget = budgets.get(reservation.budget_id)
+        if budget is None or budget.reserved_value < reservation.estimated_value:
+            raise RunSigilError(
+                ErrorCode.INVALID_TRANSITION,
+                "A model-call budget reservation cannot be reconciled safely.",
+                status_code=409,
+            )
+        budget.reserved_value -= reservation.estimated_value
+        actual = usage.get(
+            reservation.resource_key,
+            reservation.estimated_value if committed else 0,
+        )
+        if actual < 0:
+            raise RunSigilError(
+                ErrorCode.INVALID_TRANSITION,
+                "Actual model-call budget usage cannot be negative.",
                 status_code=409,
             )
         reservation.actual_value = actual

@@ -61,3 +61,29 @@ class ActionExecutionResult(BaseModel):
     receipt_preview: dict[str, Any] = Field(default_factory=dict)
     provider_reference: str | None = None
     error_code: str | None = None
+
+
+class ModelExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_call_id: UUID
+    organization_id: UUID
+    run_id: UUID
+    content_digest: str
+    idempotency_key: str
+    claim_token: str
+    model: str
+    input: dict[str, Any]
+    max_output_tokens: int = Field(ge=1, le=32_768)
+
+
+class ModelExecutionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["completed", "failed", "ambiguous"]
+    output: dict[str, Any] = Field(default_factory=dict)
+    provider_reference: str | None = None
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cost_minor: int = Field(default=0, ge=0)
+    error_code: str | None = None

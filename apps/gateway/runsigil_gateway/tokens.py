@@ -49,6 +49,36 @@ def mint_audience_token(
     return f"{encoded}.{_b64url(signature)}"
 
 
+def mint_model_audience_token(
+    *,
+    signing_key: str,
+    audience: str,
+    subject: str,
+    model_call_id: str,
+    run_id: str,
+    content_digest: str,
+    lifetime_seconds: int = 60,
+) -> str:
+    now = int(time.time())
+    header = {"alg": "HS256", "typ": "JWT", "kid": "runsigil-demo-provider-v1"}
+    claims = {
+        "iss": "runsigil-gateway",
+        "aud": audience,
+        "sub": subject,
+        "iat": now,
+        "exp": now + lifetime_seconds,
+        "jti": secrets.token_urlsafe(16),
+        "model_call_id": model_call_id,
+        "run_id": run_id,
+        "content_digest": content_digest,
+    }
+    encoded = f"{_b64url(canonical_bytes(header))}.{_b64url(canonical_bytes(claims))}"
+    signature = hmac.new(
+        signing_key.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+    ).digest()
+    return f"{encoded}.{_b64url(signature)}"
+
+
 def verify_audience_token(token: str, *, signing_key: str, audience: str) -> dict[str, Any]:
     header_part, claims_part, signature_part = token.split(".", 2)
     signed = f"{header_part}.{claims_part}"

@@ -41,10 +41,25 @@ TENANT_TABLES = [
     "evidence_bundles",
 ]
 
+# Keep this historical migration independent of models added in later milestones.
+# The Milestone 2 tables were already part of the repository metadata when this
+# baseline was cut and remain here for compatibility with its guarded 0002 upgrade.
+FOUNDATION_TABLES = [
+    "organizations",
+    *TENANT_TABLES,
+    "model_routes",
+    "budget_scopes",
+    "action_budget_reservations",
+    "dead_letters",
+]
+
 
 def upgrade() -> None:
     bind = op.get_bind()
-    Base.metadata.create_all(bind=bind)
+    Base.metadata.create_all(
+        bind=bind,
+        tables=[Base.metadata.tables[name] for name in FOUNDATION_TABLES],
+    )
 
     op.execute(
         "GRANT USAGE ON SCHEMA public TO "

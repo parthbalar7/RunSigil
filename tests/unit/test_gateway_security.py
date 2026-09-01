@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 from runsigil_gateway.egress import validate_fixed_destination
-from runsigil_gateway.tokens import mint_audience_token, verify_audience_token
+from runsigil_gateway.tokens import (
+    mint_audience_token,
+    mint_model_audience_token,
+    verify_audience_token,
+)
 
 
 def test_audience_token_is_bound_and_short_lived() -> None:
@@ -28,6 +32,25 @@ def test_audience_token_is_bound_and_short_lived() -> None:
             signing_key="provider-signing-key-with-32-characters",
             audience="provider-b",
         )
+
+
+def test_model_audience_token_is_bound_without_an_action_claim() -> None:
+    token = mint_model_audience_token(
+        signing_key="provider-signing-key-with-32-characters",
+        audience="provider-a",
+        subject="runsigil:workload:agent-a",
+        model_call_id="model-call-a",
+        run_id="run-a",
+        content_digest="sha256:" + "a" * 64,
+    )
+    claims = verify_audience_token(
+        token,
+        signing_key="provider-signing-key-with-32-characters",
+        audience="provider-a",
+    )
+
+    assert claims["model_call_id"] == "model-call-a"
+    assert "action_id" not in claims
 
 
 @pytest.mark.parametrize(

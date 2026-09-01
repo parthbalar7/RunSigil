@@ -11,7 +11,17 @@ does not discover or operate any other cluster or Compose project.
 5. Wait for `/ready` on ports 8000, 8080, and 8090.
 6. Follow the live examples in `README.md`, run
    `examples/governed-action/run-live.ps1` for the REST/CLI flow, or run
-   `examples/protocol-gateway/run-live.ps1` for MCP and A2A.
+   `examples/protocol-gateway/run-live.ps1` for MCP and A2A. Run
+   `examples/milestone-two/run-live.ps1` for framework adapters and
+   `examples/milestone-three/run-live.ps1` for durable workflow, checkpoint fork,
+   evaluation, and signed evidence proof, or
+   `examples/milestone-three-phase-two/run-live.ps1` for durable serial waits and a
+   human annotation. Run `examples/milestone-three-phase-four/run-live.ps1` for
+   referenced subworkflows, node policy, replay, and policy/safety grading, or run
+   `examples/milestone-three-phase-five/run-live.ps1` for a governed workflow tool
+   with exact approval and linked child/parent evidence, or run
+   `examples/milestone-three-phase-seven/run-live.ps1` for explicit effect
+   simulation and a live encrypted/budgeted agent-model call.
 
 OpenTelemetry traces and metrics are sent to the isolated collector when
 `RUNSIGIL_OTEL_ENABLED=true`. Its debug exporter is development-only. Use
@@ -22,7 +32,8 @@ The development endpoints are the control API at `http://localhost:8000`, protoc
 and egress gateway at `http://localhost:8080`, public A2A Agent Card at
 `http://localhost:8080/.well-known/agent-card.json`, MCP at
 `http://localhost:8080/mcp`, and A2A JSON-RPC at
-`http://localhost:8080/a2a/rpc`.
+`http://localhost:8080/a2a/rpc`. The development provider serves both the effect
+contract and fixed deterministic model contract at `http://localhost:8090`.
 
 The bootstrap key is hashed during migration/seed and never returned by the API.
 Changing it later requires the explicit development seed command; it is not silently

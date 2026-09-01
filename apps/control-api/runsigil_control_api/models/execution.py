@@ -45,6 +45,8 @@ class Run(Base, IdMixin, TenantMixin, TimestampMixin):
     environment_id: Mapped[UUID] = mapped_column()
     agent_id: Mapped[UUID] = mapped_column()
     actor_id: Mapped[UUID] = mapped_column()
+    actor_type: Mapped[str] = mapped_column(String(30), default="user", server_default="user")
+    run_kind: Mapped[str] = mapped_column(String(30), default="governed_action")
     status: Mapped[str] = mapped_column(String(40))
     idempotency_key: Mapped[str] = mapped_column(String(200))
     input_digest: Mapped[str] = mapped_column(String(71))
@@ -58,6 +60,7 @@ class Intent(Base, IdMixin, TenantMixin, TimestampMixin):
     __tablename__ = "intents"
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "id", "run_id", name="uq_intent_identity_run"),
         UniqueConstraint("organization_id", "idempotency_key"),
         ForeignKeyConstraint(
             ["organization_id", "run_id"],
@@ -85,6 +88,7 @@ class Action(Base, IdMixin, TenantMixin, TimestampMixin):
     __tablename__ = "actions"
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "id", "run_id", name="uq_action_identity_run"),
         UniqueConstraint("organization_id", "intent_id"),
         UniqueConstraint("organization_id", "provider_idempotency_key"),
         ForeignKeyConstraint(

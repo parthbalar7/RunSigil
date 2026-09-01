@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from runsigil_contracts import (
@@ -36,6 +36,8 @@ from runsigil_control_api.models import (
     Project,
     Run,
     TraceEvent,
+    WorkflowExecution,
+    WorkflowToolCall,
     WorkloadIdentity,
 )
 from runsigil_control_api.schemas import (
@@ -67,6 +69,21 @@ ACTION_BUDGET_ESTIMATES = {
 
 class ActionEncryptionSettings(Protocol):
     action_encryption_key_b64: str
+
+
+class GovernedActionSettings(ActionEncryptionSettings, Protocol):
+    approval_ttl_seconds: int
+
+
+class ActionActorContext(Protocol):
+    @property
+    def organization_id(self) -> UUID: ...
+
+    @property
+    def actor_id(self) -> UUID: ...
+
+    @property
+    def actor_type(self) -> str: ...
 
 
 def database_now(session: Session) -> datetime:
@@ -156,6 +173,10 @@ def _audit(
     content_digest: str,
     metadata: dict[str, Any],
 ) -> AuditEvent:
+    # Sessions intentionally disable autoflush so request handlers control the
+    # durable write boundary. Flush pending audit rows before allocating the
+    # next tenant sequence when one transaction appends multiple events.
+    session.flush()
     session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"runsigil-audit:{organization_id}"},
@@ -220,9 +241,9 @@ def _require_catalog(
 def create_governed_action(
     session: Session,
     *,
-    context: AuthContext,
+    context: ActionActorContext,
     request: GovernedActionInput,
-    settings: Settings | None = None,
+    settings: GovernedActionSettings | None = None,
 ) -> Run:
     settings = settings or get_settings()
     project, environment, agent = _require_catalog(session, request)
@@ -266,7 +287,10 @@ def create_governed_action(
         environment=environment.environment_type,
         risk="high",
         data_classification="confidential",
-        actor_type=context.actor_type,
+        actor_type=cast(
+            Literal["user", "service", "workload"],
+            context.actor_type,
+        ),
         amount_minor=request.amount_cents,
         occurred_at=now,
     )
@@ -302,6 +326,7 @@ def create_governed_action(
         environment_id=environment.id,
         agent_id=agent.id,
         actor_id=context.actor_id,
+        actor_type=context.actor_type,
         status="authorizing",
         idempotency_key=request.idempotency_key,
         input_digest=input_digest,
@@ -536,6 +561,23 @@ def decide_approval(
     decision: str,
     reason: str,
 ) -> Run:
+    candidate_action = session.scalar(
+        select(Action).where(Action.approval_request_id == approval_id)
+    )
+    tool_call: WorkflowToolCall | None = None
+    if candidate_action is not None:
+        from runsigil_control_api.services.workflow_tools import lock_tool_timeout_event
+
+        tool_call_id = session.scalar(
+            select(WorkflowToolCall.id).where(WorkflowToolCall.action_id == candidate_action.id)
+        )
+        if tool_call_id is not None:
+            lock_tool_timeout_event(session, tool_call_id)
+            tool_call = session.scalar(
+                select(WorkflowToolCall)
+                .where(WorkflowToolCall.id == tool_call_id)
+                .with_for_update()
+            )
     approval = session.scalar(
         select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
     )
@@ -593,6 +635,17 @@ def decide_approval(
             now=now,
         )
         status = "denied"
+        if tool_call is not None:
+            from runsigil_control_api.services.workflow_tools import (
+                reject_workflow_tool_call,
+            )
+
+            reject_workflow_tool_call(
+                session,
+                call=tool_call,
+                now=now,
+                error_code="workflow_tool_approval_denied",
+            )
     else:
         approval.status = "approved"
         action.state = "approved"
@@ -613,6 +666,14 @@ def decide_approval(
             )
         )
         status = "approved"
+        if tool_call is not None:
+            if tool_call.status != "pending_approval":
+                raise RunSigilError(
+                    ErrorCode.INVALID_TRANSITION,
+                    "The workflow tool call is no longer waiting for this approval.",
+                    status_code=409,
+                )
+            tool_call.status = "queued"
     _trace(
         session,
         organization_id=context.organization_id,
@@ -645,7 +706,7 @@ def cancel_run(
     context: AuthContext,
     run_id: UUID,
 ) -> Run:
-    """Cancel only at the pre-effect approval boundary.
+    """Cancel only at a durable pre-effect boundary.
 
     Queued and running work is deliberately not cancelable here because an outbox
     claim or external effect could race the request. Those states require a later
@@ -655,6 +716,10 @@ def cancel_run(
     run = session.scalar(select(Run).where(Run.id == run_id).with_for_update())
     if run is None:
         raise RunSigilError(ErrorCode.NOT_FOUND, "Run not found.", status_code=404)
+    if run.run_kind == "workflow":
+        from runsigil_control_api.services.workflows import cancel_workflow_run
+
+        return cancel_workflow_run(session, context=context, run=run)
     if run.status != "waiting_for_approval":
         raise RunSigilError(
             ErrorCode.INVALID_TRANSITION,
@@ -869,6 +934,14 @@ def run_detail(session: Session, run_id: UUID) -> dict[str, Any]:
         )
     )
     evidence = session.scalar(select(EvidenceBundle).where(EvidenceBundle.run_id == run.id))
+    workflow_execution = session.scalar(
+        select(WorkflowExecution).where(WorkflowExecution.run_id == run.id)
+    )
+    workflow_summary: dict[str, Any] | None = None
+    if workflow_execution is not None:
+        from runsigil_control_api.services.workflows import workflow_execution_summary
+
+        workflow_summary = workflow_execution_summary(session, workflow_execution)
     return {
         "id": run.id,
         "status": run.status,
@@ -882,6 +955,7 @@ def run_detail(session: Session, run_id: UUID) -> dict[str, Any]:
         "started_at": run.started_at,
         "completed_at": run.completed_at,
         "error_code": run.error_code,
+        "run_kind": run.run_kind,
         "action": (
             {
                 "id": action.id,
@@ -912,6 +986,7 @@ def run_detail(session: Session, run_id: UUID) -> dict[str, Any]:
             if approval is not None
             else None
         ),
+        "workflow": workflow_summary,
         "trace_events": [
             {
                 "id": event.id,

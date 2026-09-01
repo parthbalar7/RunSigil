@@ -15,6 +15,7 @@ class GatewaySettings(BaseSettings):
     internal_service_token: str = Field(min_length=32)
     gateway_service_token: str = Field(min_length=32)
     demo_provider_url: str = "http://localhost:8090/effects"
+    demo_model_provider_url: str = "http://localhost:8090/models"
     demo_provider_audience: str = "runsigil-demo-provider"
     demo_provider_signing_key: str = Field(min_length=32)
     allow_private_demo_provider: bool = True
@@ -50,6 +51,8 @@ class GatewaySettings(BaseSettings):
         if self.environment.lower() in {"production", "prod"}:
             if not self.demo_provider_url.startswith("https://"):
                 raise ValueError("production provider URL must use HTTPS")
+            if not self.demo_model_provider_url.startswith("https://"):
+                raise ValueError("production model provider URL must use HTTPS")
             if self.allow_private_demo_provider:
                 raise ValueError(
                     "production cannot enable the development private-provider override"

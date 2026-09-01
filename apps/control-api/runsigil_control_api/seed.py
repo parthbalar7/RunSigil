@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from runsigil_contracts import canonical_digest
@@ -53,6 +54,14 @@ BOOTSTRAP_SCOPES = [
     "evidence:read",
     "dlq:read",
     "dlq:redrive",
+    "workflow:read",
+    "workflow:write",
+    "workflow:deploy",
+    "workflow:run",
+    "workflow:signal",
+    "evaluation:read",
+    "evaluation:write",
+    "evaluation:run",
 ]
 
 RESOURCE_LIMITS = {
@@ -67,6 +76,35 @@ RESOURCE_LIMITS = {
 
 def _stable_id(kind: str, value: str) -> UUID:
     return uuid5(NAMESPACE_URL, f"https://runsigil.io/seed/{kind}/{value}")
+
+
+def _policy_document() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "enabled": True,
+        "valid_until": None,
+        "default_effect": "deny",
+        "rules": [
+            {
+                "id": "production-invoice-requires-approval",
+                "action_type": "demo.invoice.send",
+                "environments": ["production"],
+                "risks": ["high"],
+                "maximum_amount_minor": 100_000,
+                "effect": "require_approval",
+                "reason": "Production invoice delivery requires exact-content approval.",
+            },
+            {
+                "id": "production-deterministic-workflow-node",
+                "action_type": "workflow.node.execute",
+                "environments": ["production"],
+                "risks": ["low", "medium", "high", "critical"],
+                "maximum_amount_minor": 0,
+                "effect": "allow",
+                "reason": "Deterministic workflow nodes are allowed inside the control plane.",
+            },
+        ],
+    }
 
 
 def _seed_milestone_two(session: Session) -> None:
@@ -164,6 +202,11 @@ def seed() -> None:
                 existing.key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
                 existing.scopes_json = BOOTSTRAP_SCOPES
             _seed_milestone_two(session)
+            policy = session.get(PolicyBundle, IDS["policy"])
+            if policy is not None:
+                document = _policy_document()
+                policy.document_json = document
+                policy.content_digest = canonical_digest(document)
             return
         organization_id = IDS["organization"]
         session.add(Organization(id=organization_id, slug="sigil-labs", name="Sigil Labs"))
@@ -272,25 +315,7 @@ def seed() -> None:
                 },
             )
         )
-        policy_document = {
-            "schema_version": 1,
-            "enabled": True,
-            "valid_until": None,
-            "default_effect": "deny",
-            "rules": [
-                {
-                    "id": "production-invoice-requires-approval",
-                    "action_type": "demo.invoice.send",
-                    "environments": ["production"],
-                    "risks": ["high"],
-                    "maximum_amount_minor": 100_000,
-                    "effect": "require_approval",
-                    "reason": (
-                        "Production invoice delivery requires an exact-content human approval."
-                    ),
-                }
-            ],
-        }
+        policy_document = _policy_document()
         session.add(
             PolicyBundle(
                 id=IDS["policy"],

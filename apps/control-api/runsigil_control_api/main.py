@@ -14,6 +14,7 @@ from sqlalchemy import text
 from runsigil_control_api.database import SessionLocal
 from runsigil_control_api.routers.core import router as core_router
 from runsigil_control_api.routers.internal import router as internal_router
+from runsigil_control_api.routers.workflows import router as workflow_router
 from runsigil_control_api.settings import get_settings
 
 _settings = get_settings()
@@ -39,6 +40,7 @@ app.add_middleware(
 )
 app.include_router(core_router)
 app.include_router(internal_router)
+app.include_router(workflow_router)
 
 
 @app.middleware("http")

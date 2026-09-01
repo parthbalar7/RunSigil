@@ -8,7 +8,13 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from runsigil_contracts import ActionExecutionRequest, ActionExecutionResult, canonical_digest
+from runsigil_contracts import (
+    ActionExecutionRequest,
+    ActionExecutionResult,
+    ModelExecutionRequest,
+    ModelExecutionResult,
+    canonical_digest,
+)
 from runsigil_contracts.errors import ErrorCode, RunSigilError
 from runsigil_telemetry import Operation, TelemetryConfig, configure_telemetry
 
@@ -16,7 +22,7 @@ from runsigil_gateway.a2a import router as a2a_router
 from runsigil_gateway.egress import validate_fixed_destination
 from runsigil_gateway.mcp import router as mcp_router
 from runsigil_gateway.settings import GatewaySettings, get_gateway_settings
-from runsigil_gateway.tokens import mint_audience_token
+from runsigil_gateway.tokens import mint_audience_token, mint_model_audience_token
 
 _settings = get_gateway_settings()
 configure_telemetry(
@@ -79,6 +85,57 @@ async def _authorize(
     return authorization
 
 
+async def _authorize_model(
+    request: ModelExecutionRequest, mode: str, settings: GatewaySettings
+) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
+        response = await client.post(
+            (
+                f"{settings.control_api_url.rstrip('/')}/internal/v1/model-calls/"
+                f"{request.model_call_id}/authorize"
+            ),
+            headers={"X-RunSigil-Service-Token": settings.gateway_service_token},
+            json={
+                "content_digest": request.content_digest,
+                "claim_token": request.claim_token,
+                "mode": mode,
+            },
+        )
+    if response.status_code != 200:
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Final online authorization denied model-provider egress.",
+            status_code=403,
+        )
+    raw_authorization: Any = response.json()
+    if not isinstance(raw_authorization, dict):
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Model authorization response is not an object.",
+            status_code=403,
+        )
+    authorization = cast(dict[str, Any], raw_authorization)
+    if authorization.get("content_digest") != request.content_digest:
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Model authorization digest mismatch.",
+            status_code=403,
+        )
+    if authorization.get("request_digest") != canonical_digest(request.input):
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Model input does not match durable intent.",
+            status_code=403,
+        )
+    if authorization.get("model") != request.model:
+        raise RunSigilError(
+            ErrorCode.ACTION_NOT_AUTHORIZED,
+            "Model route does not match durable intent.",
+            status_code=403,
+        )
+    return authorization
+
+
 def _provider_headers(
     request: ActionExecutionRequest,
     authorization: dict[str, Any],
@@ -97,6 +154,51 @@ def _provider_headers(
         "Idempotency-Key": request.idempotency_key,
         "Content-Type": "application/json",
     }
+
+
+def _model_provider_headers(
+    request: ModelExecutionRequest,
+    authorization: dict[str, Any],
+    settings: GatewaySettings,
+) -> dict[str, str]:
+    token = mint_model_audience_token(
+        signing_key=settings.demo_provider_signing_key,
+        audience=authorization["audience"],
+        subject=authorization["workload_subject"],
+        model_call_id=str(request.model_call_id),
+        run_id=str(request.run_id),
+        content_digest=request.content_digest,
+    )
+    return {
+        "Authorization": f"Bearer {token}",
+        "Idempotency-Key": request.idempotency_key,
+        "Content-Type": "application/json",
+    }
+
+
+def _completed_model_result(body: Any, *, max_output_tokens: int) -> ModelExecutionResult:
+    if not isinstance(body, dict) or not isinstance(body.get("output"), dict):
+        return ModelExecutionResult(
+            outcome="ambiguous", error_code="model_provider_response_invalid"
+        )
+    try:
+        result = ModelExecutionResult(
+            outcome="completed",
+            output=body["output"],
+            provider_reference=body.get("provider_reference"),
+            input_tokens=body.get("input_tokens", 0),
+            output_tokens=body.get("output_tokens", 0),
+            cost_minor=body.get("cost_minor", 0),
+        )
+        if result.output_tokens > max_output_tokens:
+            return ModelExecutionResult(
+                outcome="ambiguous", error_code="model_provider_token_limit_exceeded"
+            )
+        return result
+    except ValueError:
+        return ModelExecutionResult(
+            outcome="ambiguous", error_code="model_provider_response_invalid"
+        )
 
 
 @app.exception_handler(RunSigilError)
@@ -215,6 +317,113 @@ async def reconcile_action(
         )
 
 
+@app.post("/v1/models/execute", response_model=ModelExecutionResult)
+async def execute_model(
+    request: ModelExecutionRequest,
+    service_token: Annotated[str | None, Header(alias="X-RunSigil-Service-Token")] = None,
+) -> ModelExecutionResult:
+    settings = get_gateway_settings()
+    _verify_worker(service_token, settings)
+    validate_fixed_destination(
+        settings.demo_model_provider_url,
+        allow_private=settings.allow_private_demo_provider,
+        production=settings.environment.lower() in {"production", "prod"},
+    )
+    authorization = await _authorize_model(request, "execute", settings)
+    try:
+        with Operation(
+            f"chat {request.model}",
+            metric_name="gen_ai.client.operation.duration",
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": request.model,
+                "runsigil.run.id": str(request.run_id),
+                "runsigil.model_call.id": str(request.model_call_id),
+                "runsigil.content_captured": False,
+            },
+        ):
+            async with httpx.AsyncClient(
+                timeout=settings.gateway_request_timeout_seconds,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    settings.demo_model_provider_url,
+                    headers=_model_provider_headers(request, authorization, settings),
+                    json={
+                        "model": request.model,
+                        "input": request.input,
+                        "max_output_tokens": request.max_output_tokens,
+                    },
+                )
+        if len(response.content) > settings.gateway_response_max_bytes:
+            return ModelExecutionResult(
+                outcome="ambiguous", error_code="model_provider_response_too_large"
+            )
+        if response.status_code >= 500:
+            return ModelExecutionResult(
+                outcome="ambiguous", error_code="model_provider_server_error"
+            )
+        if response.status_code >= 400:
+            return ModelExecutionResult(outcome="failed", error_code="model_provider_rejected")
+        return _completed_model_result(
+            response.json(),
+            max_output_tokens=request.max_output_tokens,
+        )
+    except (httpx.TimeoutException, httpx.NetworkError, ValueError):
+        return ModelExecutionResult(
+            outcome="ambiguous", error_code="model_provider_outcome_unknown"
+        )
+
+
+@app.post("/v1/models/reconcile", response_model=ModelExecutionResult)
+async def reconcile_model(
+    request: ModelExecutionRequest,
+    service_token: Annotated[str | None, Header(alias="X-RunSigil-Service-Token")] = None,
+) -> ModelExecutionResult:
+    settings = get_gateway_settings()
+    _verify_worker(service_token, settings)
+    validate_fixed_destination(
+        settings.demo_model_provider_url,
+        allow_private=settings.allow_private_demo_provider,
+        production=settings.environment.lower() in {"production", "prod"},
+    )
+    authorization = await _authorize_model(request, "reconcile", settings)
+    url = (
+        f"{settings.demo_model_provider_url.rstrip('/')}/{quote(request.idempotency_key, safe='')}"
+    )
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.gateway_request_timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await client.get(
+                url,
+                headers=_model_provider_headers(request, authorization, settings),
+            )
+        if len(response.content) > settings.gateway_response_max_bytes:
+            return ModelExecutionResult(
+                outcome="ambiguous", error_code="model_provider_response_too_large"
+            )
+        if response.status_code == 404:
+            return ModelExecutionResult(
+                outcome="failed", error_code="model_provider_confirmed_absent"
+            )
+        if response.status_code != 200:
+            return ModelExecutionResult(
+                outcome="ambiguous", error_code="model_provider_reconciliation_unknown"
+            )
+        return _completed_model_result(
+            response.json(),
+            max_output_tokens=request.max_output_tokens,
+        )
+    except (httpx.TimeoutException, httpx.NetworkError, ValueError):
+        return ModelExecutionResult(
+            outcome="ambiguous", error_code="model_provider_reconciliation_unknown"
+        )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "runsigil-gateway"}
@@ -225,6 +434,11 @@ def ready() -> dict[str, str]:
     settings = get_gateway_settings()
     validate_fixed_destination(
         settings.demo_provider_url,
+        allow_private=settings.allow_private_demo_provider,
+        production=settings.environment.lower() in {"production", "prod"},
+    )
+    validate_fixed_destination(
+        settings.demo_model_provider_url,
         allow_private=settings.allow_private_demo_provider,
         production=settings.environment.lower() in {"production", "prod"},
     )

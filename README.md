@@ -3,17 +3,19 @@
 > Govern every agent run.
 
 RunSigil is an independent, open-source control plane for governing agent actions.
-This repository delivers **Milestones 0-2** as a tested governed-action reference
-slice. A
+This repository delivers **Milestones 0-2** plus seven tested Milestone 3
+workflow/evaluation phases. A
 content-bound, approval-gated side effect can start through the CLI, web UI, MCP, or
 A2A and proceed through the same tenant-scoped API, durable intent and transactional
 outbox, worker, fail-closed gateway authorization, demo provider, traces, and
 publicly verifiable Ed25519 evidence.
 
 It does not share another product's database, cluster, secrets, or runtime resources,
-and it does not execute arbitrary agent processes. Workflow Engine v2, enterprise
-SSO, production containment, and hardened cloud deployment belong to later
-milestones.
+and it does not host arbitrary agent processes. A single catalog-bound transactional
+workflow tool is executable through the governed child-run boundary and one serial
+agent node can call the fixed demo model route through durable governance. Supervisor,
+general connector, and handoff execution remain later phases, as do enterprise SSO,
+production containment, and hardened cloud deployment.
 
 ## What works now
 
@@ -38,6 +40,29 @@ milestones.
 - Raw action arguments excluded from traces and evidence by default.
 - Canonical JSON evidence signed with Ed25519 and verified offline by the CLI.
 - Accessible React operator surface for creating, approving, and inspecting a run.
+- Immutable workflow definitions and deployments with semantic graph validation.
+- Durable deterministic input/output, condition, fan-out/fan-in, bounded-loop,
+  timer, approval, information-request, and authenticated event execution with
+  encrypted checkpoints, lease recovery, checkpoint forks, and fail-closed waits.
+- Durable referenced subworkflows with recursive deployment validation, exact
+  parent/child lineage, encrypted state transfer, bounded depth/time, and safe idle
+  cancellation finalized into signed evidence.
+- Per-node typed policy evaluation with append-only decisions, fail-closed runtime
+  enforcement, and metadata-only evidence.
+- Deterministic checkpoint replay with exact source/final state and trajectory
+  digests and explicit `matched` or `diverged` settlement.
+- Encrypted, versioned evaluation datasets with deterministic graders, optional
+  policy/safety assertions, baseline regression comparison, release gates, and
+  append-only human annotations.
+- Signed metadata-only workflow and evaluation evidence.
+- Serial governed `tool` nodes backed by child Runs with exact intent, delegation,
+  action policy, budget reservations, one-use approval, transactional outbox,
+  reconciliation/DLQ, and child/parent signed evidence lineage.
+- Explicit immutable simulation profiles for effectful fork, replay, and evaluation;
+  deterministic calls prove `side_effect_performed=false` and preserve exact digests.
+- Serial governed `agent` nodes with encrypted model input/output, exact route and
+  policy lineage, delegations, multi-scope budgets, committed leases, gateway final
+  authorization, audience-bound credentials, and reconcile-only ambiguity handling.
 
 ## Quick start
 
@@ -85,6 +110,38 @@ external model API key:
 
 ```powershell
 ./examples/milestone-two/run-live.ps1
+```
+
+To run the first Milestone 3 workflow/evaluation vertical slice:
+
+```powershell
+./examples/milestone-three/run-live.ps1
+```
+
+To exercise the phase-two serial wait lifecycle and human annotation surface:
+
+```powershell
+./examples/milestone-three-phase-two/run-live.ps1
+```
+
+To exercise referenced subworkflows, per-node policy, deterministic replay, and
+policy/safety evaluation:
+
+```powershell
+./examples/milestone-three-phase-four/run-live.ps1
+```
+
+To exercise a Workflow Engine tool node through exact approval, the live gateway,
+the demo provider, and linked child/parent evidence:
+
+```powershell
+./examples/milestone-three-phase-five/run-live.ps1
+```
+
+To exercise explicit tool simulation plus a durable live agent-model call:
+
+```powershell
+./examples/milestone-three-phase-seven/run-live.ps1
 ```
 
 The operator UI is at `http://localhost:3000`. See
