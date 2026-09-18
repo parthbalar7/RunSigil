@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4.3.1
+      - uses: azure/setup-helm@v5.0.1
         with:
           version: v3.18.6
       - name: Validate Compose interpolation
